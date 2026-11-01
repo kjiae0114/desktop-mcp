@@ -1,0 +1,10 @@
+﻿.venv/
+.venv-new/
+__pycache__/
+*.py[cod]
+*.bak
+.env
+.env.*
+!.env.example
+workspace/*
+!workspace/.gitkeep
