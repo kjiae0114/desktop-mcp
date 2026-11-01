@@ -134,3 +134,26 @@ def test_junction_escape_rejected(box, root, tmp_path):
 
     assert box.call("write_file", {"path": "link/x.txt", "content": "x"}).startswith("오류")
     assert not (outside / "x.txt").exists()
+
+
+@pytest.mark.parametrize(
+    "path", ["src/a.py", "SRC/A.PY", "src\\a.py", "./src/a.py"]
+)
+def test_protected_file_is_readable_but_not_writable(root, path):
+    box = ToolBox(root, lambda: None, ["src/a.py"])
+
+    assert box.call("read_file", {"path": path}) == "x = 1\ny = 1\n"
+    for result in (
+        box.call("write_file", {"path": path, "content": "z"}),
+        box.call("replace_in_file", {"path": path, "old": "x = 1", "new": "x = 2"}),
+    ):
+        assert result == "오류: 이 테스트는 수정할 수 없습니다. 코드를 고치세요."
+    assert (root / "src" / "a.py").read_text(encoding="utf-8") == "x = 1\ny = 1\n"
+
+
+def test_unprotected_files_remain_writable(root):
+    box = ToolBox(root, lambda: None, ["src/a.py"])
+
+    box.call("write_file", {"path": "src/b.py", "content": "q"})
+
+    assert (root / "src" / "b.py").read_text(encoding="utf-8") == "q"

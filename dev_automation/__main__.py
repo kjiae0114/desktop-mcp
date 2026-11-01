@@ -25,6 +25,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     agent.add_argument("--config", default=str(REPO_ROOT / "config" / "projects.json"))
     agent.add_argument("--runs-dir", default=str(REPO_ROOT / "runs" / "agent"))
     agent.add_argument("--max-steps", type=int, default=25)
+    agent.add_argument(
+        "--test", action="append", default=[], metavar="경로",
+        help="수정을 금지할 테스트 파일(프로젝트 루트 기준). 반복 가능",
+    )
     return parser.parse_args(argv)
 
 
@@ -48,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         OllamaClient(args.model),
         Path(args.runs_dir),
         max_steps=args.max_steps,
+        protected_tests=args.test,
         on_progress=_progress,
     )
 
@@ -56,6 +61,10 @@ def main(argv: list[str] | None = None) -> int:
     _progress(f"브랜치: {result.branch}")
     _progress(f"변경 파일: {', '.join(result.changed_files) or '(없음)'}")
     _progress(f"diff: {result.diff_path or '(없음)'}")
+    if result.tests_changed:
+        _progress("경고: 모델이 수정한 테스트가 있습니다. 테스트를 약화하지 않았는지 검토하세요.")
+        for name in result.tests_changed:
+            _progress(f"  {name}")
     if result.status == SUCCEEDED:
         _progress("\n검토 후 다음 명령을 사용하세요.")
         _progress(f"  git diff main..{result.branch}")

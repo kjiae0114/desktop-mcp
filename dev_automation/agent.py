@@ -3,18 +3,20 @@
 사용자의 작업 폴더는 수정하지 않고 push나 병합도 하지 않는다. 결과는 사용자가 검토한다.
 """
 
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime
+import hashlib
 import json
-from pathlib import Path
+import os
+from pathlib import Path, PureWindowsPath
 import re
 import secrets
 import shutil
 
-from dev_automation.agent_tools import TOOL_SCHEMAS, ToolBox, is_blocked
+from dev_automation.agent_tools import TOOL_SCHEMAS, ToolBox, is_blocked, normalize_path
 from dev_automation.llm import LLMClient, LLMError
-from dev_automation.paths import PathPolicyError, resolve_within
+from dev_automation.paths import PathPolicyError, resolve_new_within, resolve_within
 from dev_automation.projects import Project
 from dev_automation.runner import REJECTED, CommandSpec, RunResult, run_command
 
@@ -27,6 +29,10 @@ FEEDBACK_CHARS = 4000
 GIT_TIMEOUT_SECONDS = 120
 GIT_ENV = frozenset({"USERPROFILE", "HOME", "HOMEDRIVE", "HOMEPATH"})
 TEST_ARGS = ("-q", "--tb=short")
+MAX_REPEATED_EDITS = 3
+EDIT_TOOLS = frozenset({"write_file", "replace_in_file"})
+REPEAT_WARNING = "같은 수정을 반복하고 있습니다. 오류 메시지를 다시 읽고 다른 방법을 쓰세요."
+REPEAT_ABORT = "같은 수정을 반복해 중단했습니다."
 
 SECRET_PATTERNS = [
     re.compile(pattern)
@@ -46,6 +52,7 @@ SYSTEM_PROMPT = (
     "- 고친 뒤 run_tests로 확인합니다.\n"
     "- 작업이 끝나면 도구를 호출하지 말고 무엇을 바꿨는지 짧게 요약만 답하세요."
 )
+PROTECTED_PROMPT = "\n- 테스트 파일은 고칠 수 없습니다. 테스트를 통과하도록 코드만 고치세요."
 
 
 @dataclass
@@ -56,6 +63,7 @@ class AgentResult:
     commit: str | None = None
     changed_files: list[str] = field(default_factory=list)
     diff_path: Path | None = None
+    tests_changed: list[str] = field(default_factory=list)
 
 
 def _git(cwd: Path, *args: str) -> RunResult:
@@ -103,6 +111,64 @@ def _clear_bytecode(root: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
+def _digest(path: Path, *, ignore_eol: bool = False) -> str | None:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if ignore_eol:
+        # 줄바꿈만 다른 같은 내용은 같은 상태로 본다.
+        data = data.replace(b"\r\n", b"\n")
+    return hashlib.sha256(data).hexdigest()
+
+
+def _edit_digest(worktree: Path, path: object) -> str | None:
+    if not isinstance(path, str):
+        return None
+    try:
+        return _digest(resolve_within(worktree, path), ignore_eol=True)
+    except (PathPolicyError, OSError):
+        return None
+
+
+def _count_call(counts: dict[str, int], call: dict) -> int:
+    key = call["name"] + json.dumps(call["arguments"], sort_keys=True, ensure_ascii=False)
+    counts[key] = counts.get(key, 0) + 1
+    return counts[key]
+
+
+def _is_test_file(relative: str, locked: set[str]) -> bool:
+    if normalize_path(relative) in locked:
+        return False
+    parts = [part.lower() for part in PureWindowsPath(relative).parts]
+    return "tests" in parts or parts[-1].startswith("test_")
+
+
+def _validate_protected(
+    project: Project, paths: Sequence[str]
+) -> tuple[list[tuple[str, Path]], str | None]:
+    """잠근 테스트를 검증해 (정규화된 상대 경로, 원본 파일) 목록을 만든다."""
+    root = project.root.resolve()
+    checked: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+    for path in paths:
+        try:
+            if is_blocked(path) or path.startswith("-"):
+                return [], f"잠글 수 없는 테스트 경로입니다: {path}"
+            source = resolve_within(project.root, path)
+            relative = source.relative_to(root).as_posix()
+        except (PathPolicyError, ValueError, OSError) as exc:
+            return [], f"잠글 테스트 경로가 올바르지 않습니다: {path} ({exc})"
+        if is_blocked(relative):
+            return [], f"잠글 수 없는 테스트 경로입니다: {path}"
+        if not source.is_file():
+            return [], f"잠글 테스트가 파일이 아닙니다: {path}"
+        if relative.lower() not in seen:
+            seen.add(relative.lower())
+            checked.append((relative, source))
+    return checked, None
+
+
 def _has_secret(diff_text: str) -> bool:
     return any(
         pattern.search(line)
@@ -121,6 +187,7 @@ def run_task(
     max_steps: int = 25,
     max_fix_attempts: int = 3,
     test_timeout: float = 600,
+    protected_tests: Sequence[str] = (),
     on_progress: Callable[[str], None] = print,
 ) -> AgentResult:
     task_id = f"agent-{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
@@ -133,20 +200,41 @@ def run_task(
     result = AgentResult(FAILED, branch, "작업을 시작하지 못했습니다.")
     created = False
     diff_saved = False
+    staged_files: list[str] = []
+    locked: list[tuple[str, Path]] = []
+    locked_hashes: dict[str, str | None] = {}
 
-    def run_tests() -> RunResult:
+    def run_tests(only_locked: bool = False) -> RunResult:
         try:
             cwd = resolve_within(worktree, project.default_cwd)
         except PathPolicyError as exc:
             return RunResult("pytest", REJECTED, error=str(exc))
         _clear_bytecode(worktree)
-        return run_command("pytest", project.commands, cwd, test_timeout, TEST_ARGS)
+        commands, extra = project.commands, TEST_ARGS
+        if only_locked and locked and "pytest" in commands:
+            paths = tuple(
+                Path(os.path.relpath(worktree / rel, cwd)).as_posix() for rel, _ in locked
+            )
+            spec = commands["pytest"]
+            commands = {
+                **commands,
+                "pytest": replace(
+                    spec, allowed_extra_args=spec.allowed_extra_args | frozenset(paths)
+                ),
+            }
+            extra = TEST_ARGS + paths
+        return run_command("pytest", commands, cwd, test_timeout, extra)
+
+    def run_locked_tests() -> RunResult:
+        return run_tests(only_locked=True)
 
     def snapshot_diff() -> str:
         """새 파일을 포함한 HEAD 기준 전체 변경을 final.diff로 저장하고 내용을 반환한다."""
         nonlocal diff_saved
         _git(worktree, "add", "-A")
         _git(worktree, "diff", "--cached", "HEAD", f"--output={diff_path}")
+        names = _git(worktree, "diff", "--cached", "--name-only").stdout.split("\n")
+        staged_files[:] = [name for name in names if name]
         diff_saved = True
         try:
             return diff_path.read_text(encoding="utf-8", errors="replace")
@@ -155,6 +243,10 @@ def run_task(
 
     try:
         task_dir.mkdir(parents=True)
+        locked, problem = _validate_protected(project, protected_tests)
+        if problem:
+            result.message = problem
+            return result
         if _git(project.root, "status", "--porcelain").stdout.strip():
             on_progress("경고: 커밋되지 않은 변경은 에이전트 작업에 포함되지 않습니다.")
 
@@ -171,12 +263,29 @@ def run_task(
             result.message = "작업 전부터 테스트가 실패합니다.\n" + _feedback(baseline)
             return result
 
-        toolbox = ToolBox(worktree, run_tests)
+        system_prompt, user_task = SYSTEM_PROMPT, task
+        if locked:
+            # 기준 테스트가 끝난 뒤에 복사한다. 새 테스트는 아직 실패하는 게 정상이다.
+            for relative, source in locked:
+                target = resolve_new_within(worktree, relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+                locked_hashes[relative] = _digest(target)
+            system_prompt += PROTECTED_PROMPT
+            names = "\n".join(f"- {relative}" for relative, _ in locked)
+            user_task += f"\n\n잠근 테스트(수정 불가):\n{names}"
+            on_progress("잠근 테스트: " + ", ".join(relative for relative, _ in locked))
+
+        toolbox = ToolBox(
+            worktree, run_locked_tests if locked else run_tests, [rel for rel, _ in locked]
+        )
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": task},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_task},
         ]
         fix_attempts = 0
+        call_counts: dict[str, int] = {}
+        state_counts: dict[tuple[str, str | None], int] = {}
 
         for _ in range(max_steps):
             reply = llm.chat(_trim_messages(messages), TOOL_SCHEMAS)
@@ -193,7 +302,22 @@ def run_task(
                 for call in calls:
                     target = call["arguments"].get("path", "")
                     on_progress(f"도구: {call['name']} {target}".rstrip())
+                    is_edit = call["name"] in EDIT_TOOLS
+                    edit_path = call["arguments"].get("path") if is_edit else None
+                    before = _edit_digest(worktree, edit_path)
                     output = toolbox.call(call["name"], call["arguments"])
+                    if is_edit:
+                        repeats = _count_call(call_counts, call)
+                        after = _edit_digest(worktree, edit_path)
+                        if after != before and isinstance(edit_path, str):
+                            key = (normalize_path(edit_path), after)
+                            state_counts[key] = state_counts.get(key, 0) + 1
+                            repeats = max(repeats, state_counts[key])
+                        if repeats >= MAX_REPEATED_EDITS:
+                            result.message = REPEAT_ABORT
+                            return result
+                        if repeats >= 2:
+                            output += "\n" + REPEAT_WARNING
                     messages.append(
                         {"role": "tool", "tool_name": call["name"], "content": output}
                     )
@@ -216,14 +340,18 @@ def run_task(
                 continue
 
             diff_text = snapshot_diff()
-            names = _git(worktree, "diff", "--cached", "--name-only").stdout.split("\n")
-            files = [name for name in names if name]
+            files = list(staged_files)
             blocked = [name for name in files if is_blocked(name)]
             if blocked:
                 result.message = f"차단된 경로의 파일이 변경되어 커밋하지 않습니다: {blocked}"
                 return result
             if _has_secret(diff_text):
                 result.message = "비밀정보로 보이는 내용이 있어 커밋하지 않습니다."
+                return result
+
+            altered = [r for r, _ in locked if _digest(worktree / r) != locked_hashes[r]]
+            if altered:
+                result.message = f"잠근 테스트가 변경되어 커밋하지 않습니다: {altered}"
                 return result
 
             summary = (task.strip().splitlines() or [""])[0][:60]
@@ -252,6 +380,13 @@ def run_task(
                 pass
         if created and diff_path.exists():
             result.diff_path = diff_path
+        if created:
+            if not result.changed_files:
+                result.changed_files = list(staged_files)
+            skip = {normalize_path(relative) for relative, _ in locked}
+            result.tests_changed = [
+                name for name in result.changed_files if _is_test_file(name, skip)
+            ]
         try:
             (task_dir / "conversation.json").write_text(
                 json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8"

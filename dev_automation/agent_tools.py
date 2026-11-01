@@ -1,8 +1,10 @@
 """모델에게 제공하는 파일 도구. 오류도 예외 대신 문자열로 돌려줘 모델이 스스로 고치게 한다."""
 
 from collections.abc import Callable
+from collections.abc import Iterable
 from pathlib import Path, PureWindowsPath
 import fnmatch
+import posixpath
 
 from dev_automation.paths import PathPolicyError, resolve_new_within, resolve_within, validate_relative
 from dev_automation.runner import RunResult
@@ -21,6 +23,15 @@ def is_blocked(relative_path: str) -> bool:
     if any(part in BLOCKED_DIRS for part in parts):
         return True
     return bool(parts) and any(fnmatch.fnmatchcase(parts[-1], p) for p in BLOCKED_FILE_PATTERNS)
+
+
+def normalize_path(relative_path: str) -> str:
+    """경로 비교용 표기: 구분자는 '/', 소문자, '.'과 '..' 정리."""
+    text = relative_path.replace("\\", "/")
+    return posixpath.normpath(text).lower()
+
+
+PROTECTED_MESSAGE = "오류: 이 테스트는 수정할 수 없습니다. 코드를 고치세요."
 
 
 def _path_prop(description: str) -> dict:
@@ -65,9 +76,26 @@ def _limit(text: str) -> str:
 
 
 class ToolBox:
-    def __init__(self, root: Path, run_tests: Callable[[], RunResult]) -> None:
+    def __init__(
+        self,
+        root: Path,
+        run_tests: Callable[[], RunResult],
+        protected_paths: Iterable[str] = (),
+    ) -> None:
         self._root = root
         self._run_suite = run_tests
+        self._protected = frozenset(normalize_path(path) for path in protected_paths)
+
+    def _is_protected(self, path: object) -> bool:
+        if not isinstance(path, str) or not self._protected:
+            return False
+        if normalize_path(path) in self._protected:
+            return True
+        try:
+            relative = resolve_new_within(self._root, path).relative_to(self._root.resolve())
+        except (PathPolicyError, ValueError, OSError):
+            return False
+        return normalize_path(str(relative)) in self._protected
 
     def call(self, name: str, arguments: dict) -> str:
         handler = getattr(self, f"_{name}", None)
@@ -118,6 +146,8 @@ class ToolBox:
         return file.read_text(encoding="utf-8", errors="replace")
 
     def _write_file(self, path: str, content: str) -> str:
+        if self._is_protected(path):
+            return PROTECTED_MESSAGE
         target = self._writable(path)
         if not isinstance(content, str):
             return "오류: content는 문자열이어야 합니다."
@@ -129,6 +159,8 @@ class ToolBox:
         return f"{path}에 {len(data)}바이트를 썼습니다."
 
     def _replace_in_file(self, path: str, old: str, new: str) -> str:
+        if self._is_protected(path):
+            return PROTECTED_MESSAGE
         file = self._resolve(path)
         if not isinstance(old, str) or not isinstance(new, str) or not old:
             return "오류: old와 new는 문자열이어야 하고 old는 비어 있을 수 없습니다."

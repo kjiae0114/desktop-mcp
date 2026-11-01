@@ -295,3 +295,264 @@ def test_trim_keeps_pairs_and_limits_size():
     assert trimmed[-1] is messages[-1]
     assert sum(len(json.dumps(m, ensure_ascii=False)) for m in trimmed) <= agent.MAX_CONTEXT_CHARS
     assert len(trimmed) < len(messages)
+
+
+# ---- 잠근 테스트, 반복 감지, 결과 표시 ----
+
+NEW_TEST = "from mod import mul\n\n\ndef test_mul():\n    assert mul(2, 3) == 6\n"
+MOD_WITH_MUL = (
+    "def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n"
+)
+FIX_MUL = call("write_file", path="mod.py", content=MOD_WITH_MUL)
+
+
+@pytest.fixture
+def locked_repo(repo):
+    # 커밋하지 않은 새 테스트: 작업 폴더에만 있고 시작 시점에는 빨간 상태다.
+    (repo / "test_new.py").write_text(NEW_TEST, encoding="utf-8")
+    return repo
+
+
+def worktree_dirs(runs_dir: Path) -> list[Path]:
+    return list(runs_dir.glob("*/worktree"))
+
+
+def last_tool_output(messages: list[dict]) -> str:
+    return [m["content"] for m in messages if m["role"] == "tool"][-1]
+
+
+def test_locked_test_starts_red_then_commits_with_test(project, locked_repo, runs_dir):
+    repo = locked_repo
+    llm = FakeLLM(call("read_file", path="test_new.py"), FIX_MUL, done())
+
+    result, _ = run(project, runs_dir, llm, protected_tests=["test_new.py"])
+
+    assert result.status == agent.SUCCEEDED
+    assert sorted(result.changed_files) == ["mod.py", "test_new.py"]
+    assert result.tests_changed == []
+    assert "mul" in git(repo, "show", f"{result.branch}:test_new.py")
+    assert "mul" in git(repo, "show", f"{result.branch}:mod.py")
+    # 메인 작업 트리는 그대로다.
+    assert git(repo, "status", "--porcelain").strip() == "?? test_new.py"
+    assert "mul" not in (repo / "mod.py").read_text(encoding="utf-8")
+    assert "테스트 파일은 고칠 수 없습니다" in llm.seen[0][0]["content"]
+    assert "- test_new.py" in llm.seen[0][1]["content"]
+    assert "def test_mul" in last_tool_output(llm.seen[1])
+    assert_clean_worktrees(repo)
+
+
+def test_without_locked_tests_prompt_is_unchanged(project, runs_dir):
+    llm = FakeLLM(REFACTOR, done())
+
+    run(project, runs_dir, llm)
+
+    assert "고칠 수 없습니다" not in llm.seen[0][0]["content"]
+    assert llm.seen[0][1]["content"] == "add를 정리"
+
+
+@pytest.mark.parametrize(
+    "path", ["test_new.py", "TEST_NEW.PY", "./test_new.py"]
+)
+def test_locked_file_cannot_be_modified(project, locked_repo, runs_dir, path):
+    llm = FakeLLM(
+        call("write_file", path=path, content="TAMPERED\n"),
+        call("replace_in_file", path=path, old="mul", new="TAMPERED"),
+        call("read_file", path=path),
+        done(),
+    )
+
+    result, _ = run(
+        project, runs_dir, llm, protected_tests=["test_new.py"], max_fix_attempts=0
+    )
+
+    outputs = [m["content"] for m in llm.seen[-1] if m["role"] == "tool"]
+    assert outputs[0].startswith("오류") and "수정할 수 없습니다" in outputs[0]
+    assert "수정할 수 없습니다" in outputs[1]
+    assert outputs[2] == NEW_TEST
+    assert result.status == agent.FAILED
+    assert "TAMPERED" not in result.diff_path.read_text(encoding="utf-8")
+    assert (locked_repo / "test_new.py").read_text(encoding="utf-8") == NEW_TEST
+    assert_clean_worktrees(locked_repo)
+
+
+@pytest.mark.parametrize(
+    "bad", ["missing_test.py", ".env", "../outside.py", "sub", "a/../../x.py"]
+)
+def test_invalid_locked_paths_do_not_create_worktree(project, repo, runs_dir, tmp_path, bad):
+    (repo / ".env").write_text("K=1", encoding="utf-8")
+    (repo / "sub").mkdir()
+    (tmp_path / "outside.py").write_text("x", encoding="utf-8")
+    llm = FakeLLM()
+
+    result, _ = run(project, runs_dir, llm, protected_tests=["test_mod.py", bad])
+
+    assert result.status == agent.FAILED
+    assert llm.seen == []
+    assert branches(repo) == []
+    assert worktree_dirs(runs_dir) == []
+    assert_clean_worktrees(repo)
+
+
+def test_locked_run_tests_runs_only_locked_but_final_check_is_full(
+    project, locked_repo, runs_dir
+):
+    broken_other = call(
+        "write_file", path="test_other.py", content="def test_other():\n    assert False\n"
+    )
+    llm = FakeLLM(FIX_MUL, broken_other, call("run_tests"), done())
+
+    result, _ = run(
+        project, runs_dir, llm, protected_tests=["test_new.py"], max_fix_attempts=0
+    )
+
+    # 도구 결과: 잠근 테스트 하나만 실행되어 통과한다.
+    assert len(llm.seen) == 4
+    output = last_tool_output(llm.seen[3])
+    assert "1 passed" in output and "failed" not in output
+    # 최종 검증은 전체 테스트라 test_other 실패가 드러난다.
+    assert result.status == agent.FAILED
+    assert "계속 실패" in result.message
+    assert branches(locked_repo) == []
+    assert_clean_worktrees(locked_repo)
+
+
+def test_locked_tests_with_subdirectory_cwd(repo, runs_dir):
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "test_base.py").write_text(
+        "def test_base():\n    assert True\n", encoding="utf-8"
+    )
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "pkg")
+    (repo / "pkg" / "test_sub.py").write_text("def test_sub():\n    assert True\n", encoding="utf-8")
+    spec = CommandSpec(sys.executable, ("-m", "pytest"), frozenset({"-q", "--tb=short"}))
+    sub_project = Project("demo", repo, "pkg", {"pytest": spec})
+    llm = FakeLLM(call("write_file", path="pkg/x.py", content="X = 1\n"), call("run_tests"), done())
+
+    result, _ = run(sub_project, runs_dir, llm, protected_tests=["pkg/test_sub.py"])
+
+    assert "1 passed" in last_tool_output(llm.seen[2])
+    assert result.status == agent.SUCCEEDED
+
+
+def test_tampered_locked_file_is_not_committed(project, locked_repo, runs_dir):
+    class TamperingLLM(FakeLLM):
+        def chat(self, messages, tools):
+            if len(self.seen) == 1:
+                # 코드 수정 뒤, 모델의 최종 답 직전에 잠근 파일이 몰래 바뀐 상황
+                for path in runs_dir.glob("*/worktree/test_new.py"):
+                    path.write_text("def test_weak():\n    assert True\n", encoding="utf-8")
+            return super().chat(messages, tools)
+
+    llm = TamperingLLM(FIX_MUL, done())
+
+    result, _ = run(project, runs_dir, llm, protected_tests=["test_new.py"])
+
+    assert result.status == agent.FAILED
+    assert "잠근 테스트가 변경" in result.message
+    assert branches(locked_repo) == []
+    assert git(locked_repo, "log", "--oneline").count("\n") == 1
+    assert_clean_worktrees(locked_repo)
+
+
+def test_repeated_identical_edit_warns_then_aborts(project, repo, runs_dir):
+    llm = FakeLLM(BREAK, BREAK, BREAK, done())
+
+    result, _ = run(project, runs_dir, llm)
+
+    assert result.status == agent.FAILED
+    assert result.message == "같은 수정을 반복해 중단했습니다."
+    assert len(llm.seen) == 3
+    assert agent.REPEAT_WARNING not in last_tool_output(llm.seen[1])
+    assert agent.REPEAT_WARNING in last_tool_output(llm.seen[2])
+    assert branches(repo) == []
+    assert_clean_worktrees(repo)
+
+
+def test_content_round_trip_is_detected(project, repo, runs_dir):
+    state_a = "def add(a, b):\n    return a + b\n"
+    state_b = "def add(a, b):\n    return a - b\n"
+    llm = FakeLLM(
+        call("replace_in_file", path="mod.py", old="a + b", new="a - b"),  # B 1회
+        call("write_file", path="mod.py", content=state_a),  # A 1회
+        call("write_file", path="mod.py", content=state_b),  # B 2회: 경고
+        call("replace_in_file", path="mod.py", old="return a - b", new="return a + b"),  # A 2회
+        call("replace_in_file", path="mod.py", old="return a + b", new="return a - b"),  # B 3회
+        done(),
+    )
+
+    result, _ = run(project, runs_dir, llm)
+
+    assert result.status == agent.FAILED
+    assert result.message == "같은 수정을 반복해 중단했습니다."
+    assert len(llm.seen) == 5
+    assert agent.REPEAT_WARNING not in last_tool_output(llm.seen[2])
+    assert agent.REPEAT_WARNING in last_tool_output(llm.seen[3])
+    assert_clean_worktrees(repo)
+
+
+def test_failure_reports_staged_changed_files(project, runs_dir):
+    result, _ = run(project, runs_dir, FakeLLM(BREAK, done(), done()), max_fix_attempts=0)
+
+    assert result.status == agent.FAILED
+    assert result.changed_files == ["mod.py"]
+
+
+def test_no_changes_has_empty_changed_files(project, runs_dir):
+    result, _ = run(project, runs_dir, FakeLLM(done()))
+
+    assert result.status == agent.NO_CHANGES
+    assert result.changed_files == [] and result.tests_changed == []
+
+
+def test_tests_changed_lists_model_edited_tests(project, runs_dir):
+    llm = FakeLLM(
+        call("write_file", path="tests/helper.py", content="X = 1\n"),
+        call("write_file", path="test_extra.py", content="def test_x():\n    assert True\n"),
+        call("write_file", path="docs.py", content="Y = 1\n"),
+        done(),
+    )
+
+    result, _ = run(project, runs_dir, llm)
+
+    assert result.status == agent.SUCCEEDED
+    assert sorted(result.tests_changed) == ["test_extra.py", "tests/helper.py"]
+
+
+def _cli(monkeypatch, result):
+    from dev_automation import __main__ as cli
+
+    monkeypatch.setattr(cli, "load_projects", lambda path: {"demo": object()})
+    monkeypatch.setattr(cli, "OllamaClient", lambda model: object())
+    captured = {}
+
+    def fake_run_task(project, task, llm, runs_dir, **kwargs):
+        captured.update(kwargs)
+        return result
+
+    monkeypatch.setattr(cli, "run_task", fake_run_task)
+    return cli, captured
+
+
+def test_cli_warns_about_changed_tests_and_passes_locked(monkeypatch, capsys):
+    result = agent.AgentResult(
+        agent.SUCCEEDED, "agent/x", "ok", "abc", ["test_a.py"], tests_changed=["test_a.py"]
+    )
+    cli, captured = _cli(monkeypatch, result)
+
+    code = cli.main(["agent", "demo", "작업", "--test", "t/a.py", "--test", "t/b.py"])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert captured["protected_tests"] == ["t/a.py", "t/b.py"]
+    assert "경고: 모델이 수정한 테스트가 있습니다. 테스트를 약화하지 않았는지 검토하세요." in out
+    assert "test_a.py" in out
+
+
+def test_cli_without_changed_tests_has_no_warning(monkeypatch, capsys):
+    cli, captured = _cli(monkeypatch, agent.AgentResult(agent.FAILED, "agent/x", "실패"))
+
+    code = cli.main(["agent", "demo", "작업"])
+
+    assert code == 1
+    assert captured["protected_tests"] == []
+    assert "경고" not in capsys.readouterr().out
