@@ -65,6 +65,21 @@ def test_shell_syntax_is_not_interpreted(tmp_path):
     assert not marker.exists()
 
 
+def test_environment_is_limited_to_allowed_names(tmp_path, monkeypatch):
+    monkeypatch.setenv("DESKTOP_MCP_SECRET", "hidden")
+    monkeypatch.setenv("DESKTOP_MCP_ALLOWED", "visible")
+    code = (
+        "import os; "
+        "print(os.environ.get('DESKTOP_MCP_SECRET')); "
+        "print(os.environ.get('DESKTOP_MCP_ALLOWED'))"
+    )
+    spec = python_command(code, allowed_env=frozenset({"DESKTOP_MCP_ALLOWED"}))
+
+    result = run_command("test", {"test": spec}, tmp_path, 30)
+
+    assert result.stdout == "None\nvisible\n"
+
+
 def test_invalid_utf8_output_does_not_crash(tmp_path):
     result = run_code(r"import sys; sys.stdout.buffer.write(b'\xff')", tmp_path)
 

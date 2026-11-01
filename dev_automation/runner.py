@@ -23,6 +23,11 @@ KILL_GRACE_SECONDS = 5.0
 # CreateProcess는 배치 파일을 cmd.exe로 실행하므로 shell=False의 의미가 사라진다.
 BLOCKED_SUFFIXES = {".bat", ".cmd"}
 
+# 프로세스 실행에 필요한 최소 환경 변수. 그 외 값은 명령별로 허용해야 전달된다.
+BASE_ENV_VARS = frozenset({
+    "COMSPEC", "PATH", "PATHEXT", "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "TMP", "WINDIR",
+})
+
 
 @dataclass(frozen=True)
 class CommandSpec:
@@ -32,6 +37,8 @@ class CommandSpec:
     args: tuple[str, ...] = ()
     # 호출자가 추가할 수 있는 인자. 정확히 일치하는 값만 허용한다.
     allowed_extra_args: frozenset[str] = frozenset()
+    # 기본 환경 변수 외에 자식 프로세스로 전달할 환경 변수 이름.
+    allowed_env: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -53,6 +60,16 @@ class RunResult:
 def _decode(data: bytes | None) -> str:
     text = (data or b"").decode("utf-8", errors="replace")
     return text.replace("\r\n", "\n")
+
+
+def _build_env(spec: CommandSpec) -> dict[str, str]:
+    """허용된 환경 변수만 골라 비밀정보가 자식 프로세스로 넘어가지 않게 한다."""
+    allowed = {name.upper() for name in BASE_ENV_VARS | spec.allowed_env}
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper() in allowed
+    }
 
 
 def _kill_process_tree(process: subprocess.Popen) -> None:
@@ -127,6 +144,7 @@ def run_command(
         process = subprocess.Popen(
             argv,
             cwd=str(cwd),
+            env=_build_env(spec),
             shell=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,

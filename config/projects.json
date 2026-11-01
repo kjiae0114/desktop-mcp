@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "projects": {
+    "desktop-mcp": {
+      "path": "..",
+      "python": ".venv-new/Scripts/python.exe",
+      "default_cwd": ".",
+      "commands": ["pytest"],
+      "allowed_env": []
+    }
+  }
+}
