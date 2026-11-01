@@ -1,0 +1,166 @@
+"""허용된 명령만 shell 없이 실행하고 결과를 수집한다."""
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+import os
+from pathlib import Path
+import signal
+import subprocess
+import time
+
+# 상태 값
+SUCCEEDED = "succeeded"
+FAILED = "failed"
+TIMED_OUT = "timed_out"
+REJECTED = "rejected"  # 실행 전에 차단됨
+START_FAILED = "start_failed"  # 프로세스를 시작하지 못함
+
+MAX_TIMEOUT_SECONDS = 3600.0
+MAX_OUTPUT_CHARS = 100_000
+# 프로세스 트리 종료 후 남은 출력을 기다리는 시간
+KILL_GRACE_SECONDS = 5.0
+
+# CreateProcess는 배치 파일을 cmd.exe로 실행하므로 shell=False의 의미가 사라진다.
+BLOCKED_SUFFIXES = {".bat", ".cmd"}
+
+
+@dataclass(frozen=True)
+class CommandSpec:
+    """사전에 등록된 명령. 실행 파일과 인자를 분리해 보관한다."""
+
+    program: str
+    args: tuple[str, ...] = ()
+    # 호출자가 추가할 수 있는 인자. 정확히 일치하는 값만 허용한다.
+    allowed_extra_args: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class RunResult:
+    command_id: str
+    status: str
+    returncode: int | None = None
+    stdout: str = ""
+    stderr: str = ""
+    error: str | None = None
+    duration_seconds: float = 0.0
+    truncated: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return self.status == SUCCEEDED
+
+
+def _decode(data: bytes | None) -> str:
+    text = (data or b"").decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n")
+
+
+def _kill_process_tree(process: subprocess.Popen) -> None:
+    """프로세스와 자식 프로세스를 함께 종료한다."""
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=KILL_GRACE_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
+        try:
+            # start_new_session=True로 시작했으므로 pgid는 pid와 같다.
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    # taskkill이 실패한 경우에도 직접 실행한 프로세스는 반드시 종료한다.
+    process.kill()
+
+
+def _validate(
+    command_id: str,
+    commands: Mapping[str, CommandSpec],
+    extra_args: Sequence[str],
+    cwd: str | Path,
+    timeout: float,
+) -> str | None:
+    """요청이 잘못되었으면 차단 사유를, 정상이면 None을 반환한다."""
+    spec = commands.get(command_id)
+    if spec is None:
+        return f"허용되지 않은 명령입니다: {command_id}"
+
+    if Path(spec.program).suffix.lower() in BLOCKED_SUFFIXES:
+        return f"배치 파일은 실행할 수 없습니다: {spec.program}"
+
+    for arg in extra_args:
+        if arg not in spec.allowed_extra_args:
+            return f"허용되지 않은 인자입니다: {arg}"
+
+    if not Path(cwd).is_dir():
+        return f"작업 디렉터리가 존재하지 않습니다: {cwd}"
+
+    if not 0 < timeout <= MAX_TIMEOUT_SECONDS:
+        return f"시간 제한은 0초 초과 {MAX_TIMEOUT_SECONDS:.0f}초 이하여야 합니다."
+
+    return None
+
+
+def run_command(
+    command_id: str,
+    commands: Mapping[str, CommandSpec],
+    cwd: str | Path,
+    timeout: float,
+    extra_args: Sequence[str] = (),
+) -> RunResult:
+    """등록된 명령을 실행한다. 실행 관련 실패는 예외 대신 RunResult로 반환한다."""
+    reason = _validate(command_id, commands, extra_args, cwd, timeout)
+    if reason is not None:
+        return RunResult(command_id, REJECTED, error=reason)
+
+    spec = commands[command_id]
+    argv = [spec.program, *spec.args, *extra_args]
+    started = time.monotonic()
+
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=str(cwd),
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=os.name != "nt",
+        )
+    except OSError as exc:
+        return RunResult(command_id, START_FAILED, error=str(exc))
+
+    error = None
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+        status = SUCCEEDED if process.returncode == 0 else FAILED
+    except subprocess.TimeoutExpired:
+        status = TIMED_OUT
+        error = f"시간 제한 {timeout}초를 초과했습니다."
+        _kill_process_tree(process)
+        try:
+            stdout, stderr = process.communicate(timeout=KILL_GRACE_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            # 살아남은 자손이 파이프를 잡고 있어도 호출자를 막지 않는다.
+            stdout, stderr = exc.output, exc.stderr
+            error += " 일부 자손 프로세스가 남아 있을 수 있습니다."
+
+    stdout_text = _decode(stdout)
+    stderr_text = _decode(stderr)
+
+    return RunResult(
+        command_id=command_id,
+        status=status,
+        returncode=process.returncode,
+        stdout=stdout_text[:MAX_OUTPUT_CHARS],
+        stderr=stderr_text[:MAX_OUTPUT_CHARS],
+        error=error,
+        duration_seconds=time.monotonic() - started,
+        truncated=max(len(stdout_text), len(stderr_text)) > MAX_OUTPUT_CHARS,
+    )
