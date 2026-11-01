@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 import sys
+import threading
 import time
 
 import pytest
@@ -146,6 +147,98 @@ def test_timeout_kills_child_processes(tmp_path):
     assert result.status == runner.TIMED_OUT
     assert started_file.exists()
     assert not survived_file.exists()
+
+
+def wait_until(predicate, timeout: float = 20.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return predicate()
+
+
+def test_cancel_during_run_kills_process(tmp_path):
+    started_file = tmp_path / "started.txt"
+    event = threading.Event()
+    code = (
+        "import pathlib, time; "
+        f"pathlib.Path({str(started_file)!r}).write_text('x'); "
+        "time.sleep(60)"
+    )
+    holder = {}
+    thread = threading.Thread(
+        target=lambda: holder.update(
+            result=run_code(code, tmp_path, timeout=60, cancel_event=event)
+        )
+    )
+    thread.start()
+    assert wait_until(started_file.exists)
+
+    event.set()
+    thread.join(timeout=20)
+
+    assert not thread.is_alive()
+    result = holder["result"]
+    assert result.status == runner.CANCELLED
+    assert result.returncode is not None
+    assert result.error
+
+
+def test_cancel_before_start_does_not_run(tmp_path):
+    marker = tmp_path / "ran.txt"
+    event = threading.Event()
+    event.set()
+
+    result = run_code(f"open({str(marker)!r}, 'w')", tmp_path, cancel_event=event)
+
+    assert result.status == runner.CANCELLED
+    assert result.returncode is None
+    assert not marker.exists()
+
+
+def test_log_dir_receives_output_files(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    result = run_code(
+        "import sys; print('to-out'); print('to-err', file=sys.stderr)",
+        tmp_path,
+        log_dir=log_dir,
+    )
+
+    assert result.ok
+    assert (log_dir / "stdout.log").read_text().strip() == "to-out"
+    assert (log_dir / "stderr.log").read_text().strip() == "to-err"
+
+
+def test_output_larger_than_read_limit_is_flagged(tmp_path):
+    size = runner.MAX_OUTPUT_CHARS * 4 + 100
+    result = run_code(f"import sys; sys.stdout.write('x' * {size})", tmp_path)
+
+    assert result.truncated
+    assert len(result.stdout) == runner.MAX_OUTPUT_CHARS
+
+
+def test_short_output_is_not_flagged(tmp_path):
+    result = run_code("print('x' * 10)", tmp_path)
+
+    assert not result.truncated
+
+
+def test_returns_promptly_when_descendant_outlives_parent(tmp_path):
+    child_code = "import time; time.sleep(5)"
+    parent_code = (
+        "import subprocess, sys; "
+        f"subprocess.Popen([sys.executable, '-c', {child_code!r}])"
+    )
+
+    started = time.monotonic()
+    result = run_code(parent_code, tmp_path, timeout=30)
+    elapsed = time.monotonic() - started
+
+    assert result.ok
+    assert elapsed < 3
 
 
 def test_unregistered_command_is_rejected_before_execution(tmp_path):

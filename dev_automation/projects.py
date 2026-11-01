@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import threading
 
 from dev_automation.paths import PathPolicyError, resolve_within
 from dev_automation.runner import REJECTED, CommandSpec, RunResult, run_command
@@ -125,6 +126,9 @@ def run_project_command(
     timeout: float,
     cwd: str | None = None,
     extra_args: Sequence[str] = (),
+    *,
+    cancel_event: threading.Event | None = None,
+    log_dir: str | Path | None = None,
 ) -> RunResult:
     """등록된 프로젝트 안에서 그 프로젝트에 허용된 명령을 실행한다."""
     project = projects.get(project_id)
@@ -138,4 +142,12 @@ def run_project_command(
     except PathPolicyError as exc:
         return RunResult(command_id, REJECTED, error=str(exc))
 
-    return run_command(command_id, project.commands, resolved_cwd, timeout, extra_args)
+    return run_command(
+        command_id,
+        project.commands,
+        resolved_cwd,
+        timeout,
+        extra_args,
+        cancel_event=cancel_event,
+        log_dir=log_dir,
+    )

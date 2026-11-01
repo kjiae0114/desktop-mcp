@@ -1,11 +1,14 @@
 """허용된 명령만 shell 없이 실행하고 결과를 수집한다."""
 
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 import os
 from pathlib import Path
 import signal
 import subprocess
+import tempfile
+import threading
 import time
 
 # 상태 값
@@ -14,11 +17,14 @@ FAILED = "failed"
 TIMED_OUT = "timed_out"
 REJECTED = "rejected"  # 실행 전에 차단됨
 START_FAILED = "start_failed"  # 프로세스를 시작하지 못함
+CANCELLED = "cancelled"  # 호출자가 취소함
 
 MAX_TIMEOUT_SECONDS = 3600.0
 MAX_OUTPUT_CHARS = 100_000
-# 프로세스 트리 종료 후 남은 출력을 기다리는 시간
+# 프로세스 트리 종료 후 프로세스가 끝나기를 기다리는 시간
 KILL_GRACE_SECONDS = 5.0
+# 종료 여부, 시간 제한, 취소 요청을 확인하는 간격
+POLL_INTERVAL_SECONDS = 0.1
 
 # CreateProcess는 배치 파일을 cmd.exe로 실행하므로 shell=False의 의미가 사라진다.
 BLOCKED_SUFFIXES = {".bat", ".cmd"}
@@ -60,6 +66,19 @@ class RunResult:
 def _decode(data: bytes | None) -> str:
     text = (data or b"").decode("utf-8", errors="replace")
     return text.replace("\r\n", "\n")
+
+
+def _read_head(path: Path) -> tuple[str, bool]:
+    """로그 파일의 앞부분만 읽어 (텍스트, 잘림 여부)를 반환한다."""
+    limit = MAX_OUTPUT_CHARS * 4
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as file:
+            data = file.read(limit)
+    except OSError:
+        return "", False
+    text = _decode(data)
+    return text[:MAX_OUTPUT_CHARS], size > limit or len(text) > MAX_OUTPUT_CHARS
 
 
 def _build_env(spec: CommandSpec) -> dict[str, str]:
@@ -130,55 +149,101 @@ def run_command(
     cwd: str | Path,
     timeout: float,
     extra_args: Sequence[str] = (),
+    *,
+    cancel_event: threading.Event | None = None,
+    log_dir: str | Path | None = None,
 ) -> RunResult:
-    """등록된 명령을 실행한다. 실행 관련 실패는 예외 대신 RunResult로 반환한다."""
+    """등록된 명령을 실행한다. 실행 관련 실패는 예외 대신 RunResult로 반환한다.
+
+    출력은 항상 파일로 받는다. log_dir이 없으면 임시 폴더를 쓰고 끝나면 지운다.
+    """
     reason = _validate(command_id, commands, extra_args, cwd, timeout)
     if reason is not None:
         return RunResult(command_id, REJECTED, error=reason)
 
-    spec = commands[command_id]
+    if cancel_event is not None and cancel_event.is_set():
+        return RunResult(command_id, CANCELLED, error="실행 전에 취소되었습니다.")
+
+    with ExitStack() as stack:
+        if log_dir is None:
+            # 자손이 로그 파일을 잡고 있어도 삭제 실패로 죽지 않게 한다.
+            directory = Path(
+                stack.enter_context(tempfile.TemporaryDirectory(ignore_cleanup_errors=True))
+            )
+        else:
+            directory = Path(log_dir)
+            directory.mkdir(parents=True, exist_ok=True)
+
+        return _run_with_logs(
+            command_id, commands[command_id], cwd, timeout, extra_args, cancel_event, directory
+        )
+
+
+def _run_with_logs(
+    command_id: str,
+    spec: CommandSpec,
+    cwd: str | Path,
+    timeout: float,
+    extra_args: Sequence[str],
+    cancel_event: threading.Event | None,
+    directory: Path,
+) -> RunResult:
     argv = [spec.program, *spec.args, *extra_args]
+    stdout_path = directory / "stdout.log"
+    stderr_path = directory / "stderr.log"
     started = time.monotonic()
 
     try:
-        process = subprocess.Popen(
-            argv,
-            cwd=str(cwd),
-            env=_build_env(spec),
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=os.name != "nt",
-        )
+        with open(stdout_path, "wb") as stdout_file, open(stderr_path, "wb") as stderr_file:
+            process = subprocess.Popen(
+                argv,
+                cwd=str(cwd),
+                env=_build_env(spec),
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                start_new_session=os.name != "nt",
+            )
     except OSError as exc:
         return RunResult(command_id, START_FAILED, error=str(exc))
 
     error = None
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
+    deadline = started + timeout
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            status = CANCELLED
+            error = "호출자가 실행을 취소했습니다."
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            status = TIMED_OUT
+            error = f"시간 제한 {timeout}초를 초과했습니다."
+            break
+        try:
+            process.wait(timeout=min(POLL_INTERVAL_SECONDS, remaining))
+        except subprocess.TimeoutExpired:
+            continue
         status = SUCCEEDED if process.returncode == 0 else FAILED
-    except subprocess.TimeoutExpired:
-        status = TIMED_OUT
-        error = f"시간 제한 {timeout}초를 초과했습니다."
+        break
+
+    if status in (CANCELLED, TIMED_OUT):
         _kill_process_tree(process)
         try:
-            stdout, stderr = process.communicate(timeout=KILL_GRACE_SECONDS)
-        except subprocess.TimeoutExpired as exc:
-            # 살아남은 자손이 파이프를 잡고 있어도 호출자를 막지 않는다.
-            stdout, stderr = exc.output, exc.stderr
-            error += " 일부 자손 프로세스가 남아 있을 수 있습니다."
+            process.wait(timeout=KILL_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            error += " 프로세스가 종료되지 않았을 수 있습니다."
 
-    stdout_text = _decode(stdout)
-    stderr_text = _decode(stderr)
+    stdout_text, stdout_truncated = _read_head(stdout_path)
+    stderr_text, stderr_truncated = _read_head(stderr_path)
 
     return RunResult(
         command_id=command_id,
         status=status,
         returncode=process.returncode,
-        stdout=stdout_text[:MAX_OUTPUT_CHARS],
-        stderr=stderr_text[:MAX_OUTPUT_CHARS],
+        stdout=stdout_text,
+        stderr=stderr_text,
         error=error,
         duration_seconds=time.monotonic() - started,
-        truncated=max(len(stdout_text), len(stderr_text)) > MAX_OUTPUT_CHARS,
+        truncated=stdout_truncated or stderr_truncated,
     )
