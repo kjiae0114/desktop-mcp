@@ -310,3 +310,29 @@ def test_status_file_has_no_output_content(make_manager, runs_dir):
         "run_id", "project_id", "command_id", "status", "returncode", "error",
         "truncated", "created_at", "started_at", "finished_at", "extra_args", "cwd",
     }
+
+
+def write_record(runs_dir: Path, name: str, status: str, created_at: str) -> Path:
+    path = runs_dir / name
+    path.mkdir(parents=True)
+    record = {"run_id": name, "status": status, "created_at": created_at}
+    (path / "status.json").write_text(json.dumps(record), encoding="utf-8")
+    return path
+
+
+def test_old_finished_runs_are_pruned(root, runs_dir):
+    old = write_record(runs_dir, "a" * 32, runner.SUCCEEDED, "2026-01-01T00:00:00")
+    mid = write_record(runs_dir, "b" * 32, runner.FAILED, "2026-01-02T00:00:00")
+    new = write_record(runs_dir, "c" * 32, runner.SUCCEEDED, "2026-01-03T00:00:00")
+    queued = write_record(runs_dir, "d" * 32, QUEUED, "2025-01-01T00:00:00")
+    other = runs_dir / "not-a-run"
+    other.mkdir()
+
+    manager = RunManager({"demo": make_project(root)}, runs_dir, keep_runs=2)
+    manager.shutdown()
+
+    assert not old.exists()
+    assert mid.exists() and new.exists()
+    # 중단된 기록은 복구로 FAILED가 되므로 가장 오래된 종료 기록으로 정리된다.
+    assert not queued.exists()
+    assert other.exists()

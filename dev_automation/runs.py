@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import threading
 from uuid import uuid4
 
@@ -37,9 +38,11 @@ class RunManager:
         projects: Mapping[str, Project],
         runs_dir: str | Path,
         max_workers: int = 2,
+        keep_runs: int = 200,
     ) -> None:
         self._projects = projects
         self._runs_dir = Path(runs_dir)
+        self._keep_runs = keep_runs
         self._runs_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._events: dict[str, threading.Event] = {}
@@ -47,6 +50,7 @@ class RunManager:
             max_workers=max_workers, thread_name_prefix="run-manager"
         )
         self._recover_interrupted()
+        self._prune_old_runs()
 
     def _run_path(self, run_id: str) -> Path:
         if not isinstance(run_id, str) or not RUN_ID_PATTERN.fullmatch(run_id):
@@ -93,6 +97,25 @@ class RunManager:
                     finished_at=_now(),
                 )
                 self._save(record)
+
+    def _prune_old_runs(self) -> None:
+        """종료된 기록 중 생성 시각 기준 최신 keep_runs개만 남긴다."""
+        finished = []
+        for path in self._runs_dir.iterdir():
+            if not RUN_ID_PATTERN.fullmatch(path.name):
+                continue
+            try:
+                record = self._load(path.name)
+            except RunNotFoundError:
+                continue
+            if record.get("status") not in ACTIVE_STATUSES and isinstance(
+                record.get("created_at"), str
+            ):
+                finished.append((record["created_at"], path))
+
+        finished.sort(key=lambda item: item[0], reverse=True)
+        for _, path in finished[self._keep_runs:]:
+            shutil.rmtree(path, ignore_errors=True)
 
     def start(
         self,

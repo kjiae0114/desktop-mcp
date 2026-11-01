@@ -309,3 +309,13 @@ def test_existing_desktop_mcp_is_unaffected():
         "click_and_paste",
         "terminal",
     }
+
+
+def test_log_size_limit_kills_process(tmp_path):
+    code = "import sys, time\nwhile True:\n    sys.stdout.write('x' * 10000); sys.stdout.flush(); time.sleep(0.01)"
+
+    result = run_code(code, tmp_path, timeout=30, max_log_bytes=100_000)
+
+    assert result.status == runner.FAILED
+    assert "로그 크기" in result.error
+    assert result.duration_seconds < 20

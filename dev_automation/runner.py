@@ -21,6 +21,8 @@ CANCELLED = "cancelled"  # 호출자가 취소함
 
 MAX_TIMEOUT_SECONDS = 3600.0
 MAX_OUTPUT_CHARS = 100_000
+# stdout/stderr 로그 파일 크기 합의 상한. 넘으면 프로세스를 종료한다.
+MAX_LOG_BYTES = 50 * 1024 * 1024
 # 프로세스 트리 종료 후 프로세스가 끝나기를 기다리는 시간
 KILL_GRACE_SECONDS = 5.0
 # 종료 여부, 시간 제한, 취소 요청을 확인하는 간격
@@ -79,6 +81,16 @@ def _read_head(path: Path) -> tuple[str, bool]:
         return "", False
     text = _decode(data)
     return text[:MAX_OUTPUT_CHARS], size > limit or len(text) > MAX_OUTPUT_CHARS
+
+
+def _log_size(*paths: Path) -> int:
+    total = 0
+    for path in paths:
+        try:
+            total += path.stat().st_size
+        except OSError:
+            pass
+    return total
 
 
 def _build_env(spec: CommandSpec) -> dict[str, str]:
@@ -152,6 +164,7 @@ def run_command(
     *,
     cancel_event: threading.Event | None = None,
     log_dir: str | Path | None = None,
+    max_log_bytes: int = MAX_LOG_BYTES,
 ) -> RunResult:
     """등록된 명령을 실행한다. 실행 관련 실패는 예외 대신 RunResult로 반환한다.
 
@@ -175,7 +188,14 @@ def run_command(
             directory.mkdir(parents=True, exist_ok=True)
 
         return _run_with_logs(
-            command_id, commands[command_id], cwd, timeout, extra_args, cancel_event, directory
+            command_id,
+            commands[command_id],
+            cwd,
+            timeout,
+            extra_args,
+            cancel_event,
+            directory,
+            max_log_bytes,
         )
 
 
@@ -187,6 +207,7 @@ def _run_with_logs(
     extra_args: Sequence[str],
     cancel_event: threading.Event | None,
     directory: Path,
+    max_log_bytes: int,
 ) -> RunResult:
     argv = [spec.program, *spec.args, *extra_args]
     stdout_path = directory / "stdout.log"
@@ -223,11 +244,15 @@ def _run_with_logs(
         try:
             process.wait(timeout=min(POLL_INTERVAL_SECONDS, remaining))
         except subprocess.TimeoutExpired:
+            if _log_size(stdout_path, stderr_path) > max_log_bytes:
+                status = FAILED
+                error = f"로그 크기가 제한({max_log_bytes}바이트)을 초과했습니다."
+                break
             continue
         status = SUCCEEDED if process.returncode == 0 else FAILED
         break
 
-    if status in (CANCELLED, TIMED_OUT):
+    if process.poll() is None:
         _kill_process_tree(process)
         try:
             process.wait(timeout=KILL_GRACE_SECONDS)
