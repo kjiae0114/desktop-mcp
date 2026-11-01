@@ -19,6 +19,7 @@ from dev_automation.llm import LLMClient, LLMError
 from dev_automation.paths import PathPolicyError, resolve_new_within, resolve_within
 from dev_automation.projects import Project
 from dev_automation.runner import REJECTED, CommandSpec, RunResult, run_command
+from dev_automation.sandbox import DockerSandbox
 
 SUCCEEDED = "succeeded"
 FAILED = "failed"
@@ -188,6 +189,7 @@ def run_task(
     max_fix_attempts: int = 3,
     test_timeout: float = 600,
     protected_tests: Sequence[str] = (),
+    sandbox: DockerSandbox | None = None,
     on_progress: Callable[[str], None] = print,
 ) -> AgentResult:
     task_id = f"agent-{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
@@ -223,6 +225,16 @@ def run_task(
                 ),
             }
             extra = TEST_ARGS + paths
+        if sandbox is not None:
+            # 모델이 쓴 코드는 PC에서 실행하지 않는다. 컨테이너를 쓸 수 없으면 실패로 끝낸다.
+            spec = commands.get("pytest")
+            if spec is None:
+                return RunResult("pytest", REJECTED, error="허용되지 않은 명령입니다: pytest")
+            for arg in extra:
+                if arg not in spec.allowed_extra_args:
+                    return RunResult("pytest", REJECTED, error=f"허용되지 않은 인자입니다: {arg}")
+            relative_cwd = Path(os.path.relpath(cwd, worktree)).as_posix()
+            return sandbox.run_tests(worktree, relative_cwd, spec.args, extra, test_timeout)
         return run_command("pytest", commands, cwd, test_timeout, extra)
 
     def run_locked_tests() -> RunResult:
@@ -247,6 +259,11 @@ def run_task(
         if problem:
             result.message = problem
             return result
+        if sandbox is not None:
+            problem = sandbox.check()
+            if problem:
+                result.message = problem
+                return result
         if _git(project.root, "status", "--porcelain").stdout.strip():
             on_progress("경고: 커밋되지 않은 변경은 에이전트 작업에 포함되지 않습니다.")
 
@@ -352,6 +369,12 @@ def run_task(
             altered = [r for r, _ in locked if _digest(worktree / r) != locked_hashes[r]]
             if altered:
                 result.message = f"잠근 테스트가 변경되어 커밋하지 않습니다: {altered}"
+                return result
+
+            # 잠근 테스트 복사본만 남았다면 모델이 코드를 고치지 않은 것이다.
+            skip_locked = {normalize_path(relative) for relative, _ in locked}
+            if not [name for name in files if normalize_path(name) not in skip_locked]:
+                result.status, result.message = NO_CHANGES, "코드가 변경되지 않았습니다."
                 return result
 
             summary = (task.strip().splitlines() or [""])[0][:60]

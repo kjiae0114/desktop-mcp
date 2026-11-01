@@ -9,10 +9,12 @@ import threading
 
 from dev_automation.paths import PathPolicyError, resolve_within
 from dev_automation.runner import REJECTED, CommandSpec, RunResult, run_command
+from dev_automation.sandbox import valid_image
 
 CONFIG_VERSION = 1
 PROJECT_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
-PROJECT_KEYS = {"path", "python", "default_cwd", "commands", "allowed_env"}
+REQUIRED_KEYS = {"path", "python", "default_cwd", "commands", "allowed_env"}
+OPTIONAL_KEYS = {"sandbox"}
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,8 @@ class Project:
     root: Path
     default_cwd: str
     commands: Mapping[str, CommandSpec]
+    # 테스트를 실행할 Docker 이미지. 없으면 Docker 격리를 쓰지 않는다.
+    sandbox: str | None = None
 
 
 def _string_list(project_id: str, data: dict, key: str) -> list[str]:
@@ -55,9 +59,14 @@ def _load_project(project_id: str, data: object, config_dir: Path) -> Project:
     if not PROJECT_ID_PATTERN.fullmatch(project_id):
         raise ProjectConfigError(f"잘못된 프로젝트 ID입니다: {project_id!r}")
 
-    if not isinstance(data, dict) or set(data) != PROJECT_KEYS:
+    if (
+        not isinstance(data, dict)
+        or not REQUIRED_KEYS <= set(data)
+        or not set(data) <= REQUIRED_KEYS | OPTIONAL_KEYS
+    ):
         raise ProjectConfigError(
-            f"{project_id}: 설정 항목은 {sorted(PROJECT_KEYS)}여야 합니다."
+            f"{project_id}: 설정 항목은 {sorted(REQUIRED_KEYS)}이고, "
+            f"선택 항목은 {sorted(OPTIONAL_KEYS)}뿐입니다."
         )
 
     for key in ("path", "python", "default_cwd"):
@@ -80,6 +89,10 @@ def _load_project(project_id: str, data: object, config_dir: Path) -> Project:
     if not default_cwd.is_dir():
         raise ProjectConfigError(f"{project_id}: default_cwd는 폴더여야 합니다.")
 
+    sandbox = data.get("sandbox")
+    if "sandbox" in data and not valid_image(sandbox):
+        raise ProjectConfigError(f"{project_id}: sandbox는 올바른 Docker 이미지 이름이어야 합니다.")
+
     allowed_env = frozenset(_string_list(project_id, data, "allowed_env"))
 
     commands = {}
@@ -94,7 +107,7 @@ def _load_project(project_id: str, data: object, config_dir: Path) -> Project:
             allowed_env,
         )
 
-    return Project(project_id, root, data["default_cwd"], commands)
+    return Project(project_id, root, data["default_cwd"], commands, sandbox)
 
 
 def load_projects(config_path: str | Path) -> dict[str, Project]:

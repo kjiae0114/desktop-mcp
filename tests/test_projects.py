@@ -111,6 +111,24 @@ def test_load_project(project_root):
     assert spec.args == COMMAND_PROFILES["pytest"].args
 
 
+def test_sandbox_is_optional(project_root):
+    projects = load_projects(write_config(project_root, {"a": project_data()}))
+    assert projects["a"].sandbox is None
+
+    data = project_data(sandbox="desktop-mcp-sandbox:py312")
+    projects = load_projects(write_config(project_root, {"a": data}))
+    assert projects["a"].sandbox == "desktop-mcp-sandbox:py312"
+
+
+@pytest.mark.parametrize("missing", ["path", "python", "default_cwd", "commands", "allowed_env"])
+def test_required_keys_are_still_required(project_root, missing):
+    data = project_data()
+    del data[missing]
+
+    with pytest.raises(ProjectConfigError):
+        load_projects(write_config(project_root, {"demo": data}))
+
+
 def test_allowed_env_reaches_command_spec(project_root):
     data = project_data(allowed_env=["MY_VAR"])
 
@@ -133,6 +151,11 @@ def test_allowed_env_reaches_command_spec(project_root):
         {"path": 1},
         {"allowed_env": "PATH"},
         {"shell_command": "rm -rf ."},
+        {"sandbox": "-v"},
+        {"sandbox": "UPPER:tag"},
+        {"sandbox": "img name"},
+        {"sandbox": 1},
+        {"sandbox": None},
     ],
 )
 def test_invalid_project_settings_are_rejected(project_root, overrides):
@@ -221,3 +244,4 @@ def test_repository_config_is_valid():
     project = projects["desktop-mcp"]
     assert project.root == REPO_ROOT
     assert set(project.commands) == {"pytest"}
+    assert project.sandbox == "desktop-mcp-sandbox:py312"

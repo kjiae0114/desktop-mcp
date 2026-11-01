@@ -6,7 +6,8 @@
       "python": ".venv-new/Scripts/python.exe",
       "default_cwd": ".",
       "commands": ["pytest"],
-      "allowed_env": []
+      "allowed_env": [],
+      "sandbox": "desktop-mcp-sandbox:py312"
     }
   }
 }

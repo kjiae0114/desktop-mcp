@@ -7,6 +7,7 @@ import sys
 from dev_automation.agent import SUCCEEDED, run_task
 from dev_automation.llm import OllamaClient
 from dev_automation.projects import ProjectConfigError, load_projects
+from dev_automation.sandbox import DockerSandbox
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -29,6 +30,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--test", action="append", default=[], metavar="경로",
         help="수정을 금지할 테스트 파일(프로젝트 루트 기준). 반복 가능",
     )
+    agent.add_argument(
+        "--unsafe-host-tests", action="store_true",
+        help="Docker 격리 없이 모델이 쓴 코드를 이 PC에서 직접 실행한다. sandbox 설정이 없을 때만 쓴다.",
+    )
     return parser.parse_args(argv)
 
 
@@ -46,6 +51,20 @@ def main(argv: list[str] | None = None) -> int:
         _progress(f"등록되지 않은 프로젝트입니다: {args.project_id}")
         return 1
 
+    sandbox = None
+    if project.sandbox:
+        sandbox = DockerSandbox(project.sandbox)
+        _progress(f"테스트 격리: Docker({project.sandbox})")
+    elif args.unsafe_host_tests:
+        _progress("경고: 테스트 격리 없음. 모델이 쓴 코드가 이 PC에서 직접 실행됩니다.")
+    else:
+        _progress(
+            "이 프로젝트에는 sandbox(Docker 이미지) 설정이 없어 실행하지 않습니다. "
+            "config/projects.json에 sandbox를 추가하거나, 위험을 감수하고 "
+            "--unsafe-host-tests를 지정하세요."
+        )
+        return 1
+
     result = run_task(
         project,
         args.task,
@@ -53,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.runs_dir),
         max_steps=args.max_steps,
         protected_tests=args.test,
+        sandbox=sandbox,
         on_progress=_progress,
     )
 

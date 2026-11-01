@@ -1,4 +1,5 @@
 import asyncio
+import os
 from pathlib import Path
 import sys
 import threading
@@ -287,6 +288,9 @@ def test_invalid_timeout_is_rejected(tmp_path, timeout):
     assert result.status == runner.REJECTED
 
 
+@pytest.mark.skipif(
+    os.name != "nt", reason="desktop_mcp는 pyautogui를 가져오며 화면(DISPLAY)이 필요하다"
+)
 def test_existing_desktop_mcp_is_unaffected():
     import desktop_mcp
 

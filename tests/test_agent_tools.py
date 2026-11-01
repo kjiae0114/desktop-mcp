@@ -137,7 +137,19 @@ def test_junction_escape_rejected(box, root, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "path", ["src/a.py", "SRC/A.PY", "src\\a.py", "./src/a.py"]
+    "path",
+    [
+        "src/a.py",
+        pytest.param(
+            "SRC/A.PY",
+            marks=pytest.mark.skipif(os.name != "nt", reason="대소문자를 구분하지 않는 파일 시스템 전용"),
+        ),
+        pytest.param(
+            "src\\a.py",
+            marks=pytest.mark.skipif(os.name != "nt", reason="역슬래시 구분자는 Windows 전용"),
+        ),
+        "./src/a.py",
+    ],
 )
 def test_protected_file_is_readable_but_not_writable(root, path):
     box = ToolBox(root, lambda: None, ["src/a.py"])

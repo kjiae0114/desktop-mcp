@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -351,7 +352,15 @@ def test_without_locked_tests_prompt_is_unchanged(project, runs_dir):
 
 
 @pytest.mark.parametrize(
-    "path", ["test_new.py", "TEST_NEW.PY", "./test_new.py"]
+    "path",
+    [
+        "test_new.py",
+        pytest.param(
+            "TEST_NEW.PY",
+            marks=pytest.mark.skipif(os.name != "nt", reason="대소문자를 구분하지 않는 파일 시스템 전용"),
+        ),
+        "./test_new.py",
+    ],
 )
 def test_locked_file_cannot_be_modified(project, locked_repo, runs_dir, path):
     llm = FakeLLM(
@@ -432,6 +441,18 @@ def test_locked_tests_with_subdirectory_cwd(repo, runs_dir):
 
     assert "1 passed" in last_tool_output(llm.seen[2])
     assert result.status == agent.SUCCEEDED
+
+
+def test_only_locked_test_changed_is_no_changes(project, repo, runs_dir):
+    # 코드를 고치지 않았는데 이미 통과하는 잠근 테스트 파일만 커밋되면 안 된다.
+    (repo / "test_new.py").write_text("def test_new():\n    assert True\n", encoding="utf-8")
+
+    result, _ = run(project, runs_dir, FakeLLM(done("할 일 없음")), protected_tests=["test_new.py"])
+
+    assert result.status == agent.NO_CHANGES
+    assert branches(repo) == []
+    assert git(repo, "log", "--oneline").count("\n") == 1
+    assert_clean_worktrees(repo)
 
 
 def test_tampered_locked_file_is_not_committed(project, locked_repo, runs_dir):
@@ -521,7 +542,8 @@ def test_tests_changed_lists_model_edited_tests(project, runs_dir):
 def _cli(monkeypatch, result):
     from dev_automation import __main__ as cli
 
-    monkeypatch.setattr(cli, "load_projects", lambda path: {"demo": object()})
+    project = SimpleNamespace(sandbox=None)
+    monkeypatch.setattr(cli, "load_projects", lambda path: {"demo": project})
     monkeypatch.setattr(cli, "OllamaClient", lambda model: object())
     captured = {}
 
@@ -539,7 +561,9 @@ def test_cli_warns_about_changed_tests_and_passes_locked(monkeypatch, capsys):
     )
     cli, captured = _cli(monkeypatch, result)
 
-    code = cli.main(["agent", "demo", "작업", "--test", "t/a.py", "--test", "t/b.py"])
+    code = cli.main(
+        ["agent", "demo", "작업", "--unsafe-host-tests", "--test", "t/a.py", "--test", "t/b.py"]
+    )
 
     out = capsys.readouterr().out
     assert code == 0
@@ -551,8 +575,8 @@ def test_cli_warns_about_changed_tests_and_passes_locked(monkeypatch, capsys):
 def test_cli_without_changed_tests_has_no_warning(monkeypatch, capsys):
     cli, captured = _cli(monkeypatch, agent.AgentResult(agent.FAILED, "agent/x", "실패"))
 
-    code = cli.main(["agent", "demo", "작업"])
+    code = cli.main(["agent", "demo", "작업", "--unsafe-host-tests"])
 
     assert code == 1
     assert captured["protected_tests"] == []
-    assert "경고" not in capsys.readouterr().out
+    assert "모델이 수정한 테스트가 있습니다" not in capsys.readouterr().out

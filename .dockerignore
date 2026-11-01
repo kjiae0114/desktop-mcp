@@ -1,0 +1,11 @@
+# 모두 제외하고 requirements.txt만 허용한다. 비밀정보나 git 이력이 이미지에 들어가면 안 된다.
+*
+!requirements.txt
+
+# 위 규칙이 바뀌어도 아래 항목은 컨텍스트에 들어가지 않게 명시한다.
+.git
+.venv*
+runs
+workspace
+__pycache__
+.env*
