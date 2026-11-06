@@ -1,0 +1,32 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    # 실제 화면 조작은 가짜 GUI로 대체되고, Docker 테스트 이미지가 없으므로
+    # Docker 통합 테스트는 tests/test_sandbox.py의 docker_only 표시에 따라 자동으로 건너뛴다.
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 패키지 설치
+        run: python -m pip install -r requirements.txt pytest
+
+      - name: 테스트
+        env:
+          PYTHONUTF8: "1"
+        run: python -m pytest -rs

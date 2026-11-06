@@ -205,3 +205,64 @@ def test_server_starts_over_stdio_and_lists_tools():
     names, blocked = asyncio.run(asyncio.wait_for(scenario(), timeout=60))
     assert "screenshot" in names and len(names) == 12
     assert blocked.isError
+
+
+# --- HTTP 모드 토큰 인증 -----------------------------------------------------
+
+TOKEN = "t" * 32
+
+
+def test_http_mode_refuses_without_token(monkeypatch):
+    monkeypatch.delenv(desktop_mcp.TOKEN_ENV, raising=False)
+    with pytest.raises(SystemExit) as exc:
+        desktop_mcp.main(["--http"])
+    assert desktop_mcp.TOKEN_ENV in str(exc.value)
+
+
+def test_http_mode_refuses_short_token(monkeypatch):
+    monkeypatch.setenv(desktop_mcp.TOKEN_ENV, "short")
+    with pytest.raises(SystemExit):
+        desktop_mcp.http_token_from_env()
+
+
+def test_http_token_from_env(monkeypatch):
+    monkeypatch.setenv(desktop_mcp.TOKEN_ENV, f"  {TOKEN}\n")
+    assert desktop_mcp.http_token_from_env() == TOKEN
+
+
+INIT = {
+    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+    "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "pytest", "version": "0"},
+    },
+}
+MCP_HEADERS = {"Accept": "application/json, text/event-stream"}
+
+
+@pytest.fixture
+def http_client(monkeypatch):
+    from starlette.testclient import TestClient
+
+    # 세션 매니저는 한 번만 실행할 수 있으므로 테스트마다 새로 만들게 한다.
+    monkeypatch.setattr(desktop_mcp.mcp, "_session_manager", None)
+
+    with TestClient(desktop_mcp.build_http_app(TOKEN), base_url="http://127.0.0.1:8765") as client:
+        yield client
+
+
+@pytest.mark.parametrize("auth", [None, "Bearer wrong-token-wrong-token", TOKEN, f"Basic {TOKEN}"])
+def test_http_rejects_missing_or_wrong_token(http_client, auth):
+    headers = dict(MCP_HEADERS)
+    if auth is not None:
+        headers["Authorization"] = auth
+    response = http_client.post("/mcp", json=INIT, headers=headers)
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+def test_http_accepts_correct_token(http_client):
+    headers = {**MCP_HEADERS, "Authorization": f"Bearer {TOKEN}"}
+    response = http_client.post("/mcp", json=INIT, headers=headers)
+    assert response.status_code == 200
+    assert "windows-desktop" in response.text

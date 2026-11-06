@@ -1,5 +1,7 @@
 # desktop-mcp
 
+[![test](https://github.com/kjiae0114/desktop-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/kjiae0114/desktop-mcp/actions/workflows/test.yml)
+
 > **English summary** — A Windows-only personal toolbox with two independent parts:
 > **(A)** a local coding agent that lets a free Ollama model (`qwen3.5:4b`) edit code in an isolated
 > Git worktree, runs the model's code only inside a network-less Docker container, and commits to a
@@ -7,7 +9,8 @@
 > (`desktop_mcp.py`, Python + FastMCP + PyAutoGUI) that gives Claude Desktop / Claude Code allow-listed
 > screen capture, clicks, keys, and file access limited to `workspace/`.
 > Quick start: `.\scripts\check.ps1 -Setup` (venv + deps + tests), then register the MCP server as in §4-2.
-> All safety rules are allow-lists, and there are 256 pytest tests (Docker tests auto-skip without Docker).
+> HTTP mode (`--http`) requires a bearer token in `DESKTOP_MCP_TOKEN`; stdio is the default and recommended.
+> All safety rules are allow-lists, and there are 264 pytest tests, run on Windows by GitHub Actions (Docker tests auto-skip without Docker).
 
 이 문서만 보고 처음 받는 사람도 설치, 사용, 문제 해결, 유지보수를 할 수 있도록 썼습니다. 모든 명령은 PowerShell에서 이 폴더(`desktop-mcp`)를 현재 위치로 두고 실행합니다.
 
@@ -40,7 +43,7 @@
 
 ### 2-2. 가상환경과 패키지
 
-이 프로젝트는 **`.venv-new`** 를 씁니다. 폴더에 있는 `.venv`는 Python 3.8로 만든 옛 환경이라 쓰지 않습니다.
+이 프로젝트는 **`.venv-new`** 를 씁니다(스크립트와 문서가 모두 이 이름을 가정합니다). 2-5의 `.\scripts\check.ps1 -Setup`이 아래 두 줄을 대신 해 줍니다.
 
 ```powershell
 py -3.12 -m venv .venv-new        # .venv-new가 이미 있으면 건너뜀
@@ -72,7 +75,7 @@ docker image ls desktop-mcp-sandbox   # py312 태그가 보이면 완료
 
 - 직접 돌리려면 `.\.venv-new\Scripts\python.exe -m pytest` (옵션은 `pytest.ini`에 있음).
 - 약 2~3분이 걸립니다. Docker 컨테이너를 실제로 띄우는 테스트가 포함되어 있기 때문입니다. Docker나 이미지가 없으면 그 테스트들은 건너뜁니다.
-- 2026-11-06 기준 결과는 `255 passed, 1 skipped`입니다.
+- 2026-11-06 기준 결과는 `263 passed, 1 skipped`입니다. 새로 clone한 폴더에서 `-Setup`부터 따라 해서 같은 결과가 나오는 것을 확인했습니다(Docker 이미지가 이미 있는 PC 기준).
 - 건너뛴 1건은 심볼릭 링크를 만들 권한이 없어서입니다. Windows 개발자 모드를 켜면 실행됩니다.
 - 실패가 있으면 아래 "7. 문제 해결"을 보세요.
 
@@ -180,16 +183,26 @@ git branch -D agent/agent-20261106-010556-a54f2a           # 버릴 거면 브�
 | 방식 | 명령 | 언제 |
 |---|---|---|
 | **stdio (기본)** | `.\.venv-new\Scripts\python.exe desktop_mcp.py` | Claude Desktop·Claude Code가 필요할 때 직접 띄움. 손으로 실행할 일 없음 |
-| HTTP | `.\.venv-new\Scripts\python.exe desktop_mcp.py --http` | 서버를 따로 켜 두고 여러 클라이언트가 붙을 때. 주소 `http://127.0.0.1:8765/mcp` |
+| HTTP | `.\.venv-new\Scripts\python.exe desktop_mcp.py --http` | 서버를 따로 켜 두고 여러 클라이언트가 붙을 때. 주소 `http://127.0.0.1:8765/mcp`, **토큰 필수** |
 
 - stdio 방식을 손으로 실행하면 입력을 기다리며 아무것도 출력하지 않는 것이 정상입니다(`Ctrl+C`로 종료).
-- HTTP 방식은 이 PC 안에서만 접속할 수 있지만 인증이 없습니다. 같은 PC의 다른 프로그램도 접속할 수 있으니 쓸 때만 켜 두세요.
+- HTTP 방식은 이 PC 안(127.0.0.1)에서만 접속할 수 있고, 모든 요청에 `Authorization: Bearer <토큰>` 헤더가 있어야 합니다. 헤더가 없거나 토큰이 틀리면 `401`을 돌려줍니다.
+- 토큰은 환경변수 `DESKTOP_MCP_TOKEN`으로 줍니다(16자 이상). 없으면 서버가 시작하지 않고 안내 메시지를 낸 뒤 종료합니다.
+
+  ```powershell
+  $env:DESKTOP_MCP_TOKEN = .\.venv-new\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
+  $env:DESKTOP_MCP_TOKEN            # 클라이언트 설정에 넣을 값. 남에게 보여 주지 말 것
+  .\.venv-new\Scripts\python.exe desktop_mcp.py --http
+  ```
+
+  `$env:`로 넣은 값은 그 PowerShell 창을 닫으면 사라집니다. 다음에는 새 토큰을 만들고 클라이언트 설정도 바꿉니다.
+- 특별한 이유가 없으면 stdio 방식을 쓰세요. 네트워크 포트를 열지 않아 더 안전합니다.
 - 파일을 다루는 작업 폴더는 `workspace/`입니다. 그 밖의 경로는 거부합니다.
 - 2026-11-06 이전 버전은 인자 없이 실행하면 HTTP였습니다. 지금은 `--http`가 필요합니다.
 
 ### 4-2. AI 프로그램에 연결
 
-**Claude Desktop:** 설정 → 개발자 → 구성 편집을 누르면 `%APPDATA%\Claude\claude_desktop_config.json`이 열립니다. 아래 내용을 넣고 Claude Desktop을 완전히 종료(트레이 아이콘까지)한 뒤 다시 엽니다. 경로는 내 PC에 맞게 바꾸고 `\`는 `/`로 씁니다.
+**Claude Desktop:** 설정 → 개발자 → 구성 편집을 누르면 설정 파일(`claude_desktop_config.json`)이 열립니다. 보통 `%APPDATA%\Claude\`에 있습니다. Microsoft Store판처럼 그 폴더에 없을 때는 `%LOCALAPPDATA%\Claude-Data\claude_<무작위 문자열>\`에 있습니다. 이 파일에는 앱 환경설정(`preferences`)도 들어 있으니 다른 내용은 지우지 말고, 맨 바깥 `{ }` 안에 `"mcpServers"` 항목만 추가하세요. 아래 내용을 넣고 Claude Desktop을 완전히 종료(트레이 아이콘까지)한 뒤 다시 엽니다. 경로는 내 PC에 맞게 바꾸고 `\`는 `/`로 씁니다.
 
 ```json
 {
@@ -214,7 +227,7 @@ claude mcp list
 **HTTP 방식으로 붙일 때** (4-1의 `--http`로 서버를 먼저 켬):
 
 ```powershell
-claude mcp add --transport http windows-desktop http://127.0.0.1:8765/mcp
+claude mcp add --transport http windows-desktop http://127.0.0.1:8765/mcp --header "Authorization: Bearer $env:DESKTOP_MCP_TOKEN"
 ```
 
 - 자동 테스트(`tests/test_desktop_mcp.py`)가 서버를 stdio로 실제로 띄워 도구 12개 목록과 경로 탈출 차단을 확인합니다.
@@ -309,7 +322,6 @@ docker build -t my-app-sandbox:py312 -f C:\programming\02_tools\desktop-mcp\sand
 | `runs/` | 에이전트 실행 기록 | 제외 |
 | `workspace/` | MCP 서버의 파일 작업 폴더, 실험 스크립트 | 제외 |
 | `.venv-new/` | 사용하는 가상환경 | 제외 |
-| `.venv/` | 쓰지 않는 옛 환경(Python 3.8). 지워도 됨 | 제외 |
 
 | `dev_automation/` 파일 | 역할 |
 |---|---|
@@ -345,7 +357,8 @@ docker build -t my-app-sandbox:py312 -f C:\programming\02_tools\desktop-mcp\sand
 
 ## 8. 유지보수
 
-- **변경 후 확인:** 코드를 고치면 `.\.venv-new\Scripts\python.exe -m pytest -q --tb=short`로 전체 테스트를 돌립니다.
+- **변경 후 확인:** 코드를 고치면 `.\scripts\check.ps1`로 전체 테스트를 돌립니다.
+- **CI:** GitHub에 push하거나 PR을 열면 GitHub Actions(`.github/workflows/test.yml`)가 `windows-latest`에서 같은 테스트를 돌립니다. CI에는 Docker 테스트 이미지가 없어서 Docker 통합 테스트 17개와 `.venv-new`가 필요한 테스트 1개는 건너뜁니다(2026-11-06 기준 `246 passed, 18 skipped`). 그래서 Docker 쪽을 고쳤다면 내 PC에서도 꼭 돌려 보세요. 결과는 README 맨 위 배지와 저장소의 Actions 탭에서 봅니다.
 - **의존성 변경:** `requirements.txt`를 바꾸면 2-2의 pip 설치와 2-4의 이미지 빌드를 다시 합니다.
 - **모델 교체:**
   1. `ollama pull 새모델`로 받습니다.
@@ -357,7 +370,7 @@ docker build -t my-app-sandbox:py312 -f C:\programming\02_tools\desktop-mcp\sand
   - 새 기능도 허용 목록 방식으로 제한합니다.
   - 화면을 건드리는 코드는 `pyautogui`를 직접 쓰지 말고 `_gui()`를 통해 씁니다(테스트에서 가짜로 바꿔 끼움).
   - `tests/test_desktop_mcp.py`에 테스트를 추가하고, 도구 이름 목록(`test_registered_tools`, 개수 확인)과 `tests/test_runner.py`의 `test_existing_desktop_mcp_is_unaffected` 목록도 함께 고칩니다.
-- **정리:** 쌓인 `runs/agent/*` 폴더, 쓰지 않는 `agent/*` 브랜치(`git branch --list "agent/*"`), `.venv`는 지워도 됩니다.
+- **정리:** 쌓인 `runs/agent/*` 폴더와 쓰지 않는 `agent/*` 브랜치(`git branch --list "agent/*"`)는 지워도 됩니다. main에 병합된 브랜치는 `git branch --merged main`으로 확인한 뒤 `git branch -d`로 지웁니다.
 
 ## 9. 안전 규칙과 알려진 한계
 
@@ -378,7 +391,7 @@ docker build -t my-app-sandbox:py312 -f C:\programming\02_tools\desktop-mcp\sand
 | 병합 후 | 병합한 코드는 격리 없이 실행됨 |
 | 테스트 약화 | `--test` 없이 실행하면 모델이 테스트를 고쳐 통과시킬 수 있음(경고는 나옴) |
 | 비밀값 검사 | GitHub 토큰, AWS 키, 개인키, `sk-` 키 패턴만 검사. 그 밖의 비밀번호 문자열은 못 잡음 |
-| MCP 서버 | HTTP 방식은 인증 없음. 입력값 검사는 가짜 GUI로 테스트하지만 실제 클릭·입력이 화면에 반영되는지는 자동 테스트 없음 |
+| MCP 서버 | HTTP 방식은 고정 토큰 하나만 검사(사용자 구분·만료 없음). 입력값 검사는 가짜 GUI로 테스트하지만 실제 클릭·입력이 화면에 반영되는지는 자동 테스트 없음 |
 | 미완성 | `runs.py`(백그라운드 실행 이력)는 만들었지만 MCP 도구로 연결하지 않음 |
 
 ## 10. 인수인계 체크리스트
@@ -386,6 +399,6 @@ docker build -t my-app-sandbox:py312 -f C:\programming\02_tools\desktop-mcp\sand
 - [ ] 2-1의 확인 명령이 모두 정상 출력
 - [ ] `ollama list`에 `qwen3.5:4b-q4_K_M`
 - [ ] `docker image ls desktop-mcp-sandbox`에 `py312`
-- [ ] `.\scripts\check.ps1` 결과 `255 passed, 1 skipped` (심볼릭 링크 권한이 있으면 skipped 없이 모두 passed)
+- [ ] `.\scripts\check.ps1` 결과 `263 passed, 1 skipped` (심볼릭 링크 권한이 있으면 skipped 없이 모두 passed)
 - [ ] 3-2 예시를 직접 실행해 `succeeded` 확인 후 `git branch -D`로 정리
 - [ ] 4-2대로 Claude Desktop에 등록하고 도구 12개가 보이는지 확인

@@ -16,11 +16,14 @@ Windows 전용 개인 도구입니다. 서로 호출하지 않는 프로그램 �
 .\scripts\check.ps1 -Setup -Image   # venv 생성 + pip 설치 + Docker 이미지 빌드 + 테스트
 .\.venv-new\Scripts\python.exe -m pytest tests/test_desktop_mcp.py   # 일부만
 .\.venv-new\Scripts\python.exe desktop_mcp.py          # MCP 서버 (stdio)
-.\.venv-new\Scripts\python.exe desktop_mcp.py --http   # MCP 서버 (http://127.0.0.1:8765/mcp)
+.\.venv-new\Scripts\python.exe desktop_mcp.py --http   # MCP 서버 (http://127.0.0.1:8765/mcp, $env:DESKTOP_MCP_TOKEN 16자 이상 필수)
 .\.venv-new\Scripts\python.exe -m dev_automation agent desktop-mcp "<작업>" --test <잠글 테스트>
 ```
 
-- 가상환경은 `.venv-new`(Python 3.12)를 씁니다. `.venv`는 쓰지 않는 Python 3.8 환경입니다.
+- CI는 `.github/workflows/test.yml`입니다(windows-latest, push to main과 PR). Docker 통합 테스트는 이미지가 없어 skip되므로 Docker 관련 변경은 로컬에서도 확인합니다.
+- HTTP 모드는 `BearerTokenMiddleware`가 모든 요청의 `Authorization: Bearer` 헤더를 검사합니다. 이 검사를 우회하는 경로를 만들지 않습니다.
+
+- 가상환경은 `.venv-new`(Python 3.12)를 씁니다.
 - `pytest.ini`가 `tests/`만 수집합니다. `runs/`에는 에이전트 워크트리(저장소 전체 사본)가 생기므로 수집하면 중복 오류가 납니다.
 
 ## 구조
@@ -52,10 +55,16 @@ Windows 전용 개인 도구입니다. 서로 호출하지 않는 프로그램 �
 
 ## 남은 할 일 (TODO)
 
-- [ ] `dev_automation/runs.py`(백그라운드 실행 이력·로그·취소)를 MCP 도구나 CLI에 연결합니다. 지금은 테스트만 있고 호출하는 곳이 없습니다.
-- [ ] HTTP 모드에 인증이 없습니다. 토큰 헤더를 검사하거나 stdio만 쓰도록 정리합니다.
-- [ ] `coordinate_picker.py`에는 테스트가 없습니다. 좌표 변환 부분을 함수로 분리하면 테스트할 수 있습니다.
-- [ ] 실제 클릭·입력이 화면에 반영되는지는 사람이 확인합니다(자동 E2E 없음).
-- [ ] Claude Desktop 등록(README 4-2)을 실제 앱에서 확인한 뒤 README에 결과를 적습니다.
-- [ ] 정리: 쓰지 않는 `.venv`, 오래된 `agent/*` 브랜치와 `runs/agent/*` 폴더, `desktop_mcp.py.*.bak`, 루트의 빈 파일 `update.finished`를 지웁니다.
-- [ ] 비밀값 검사 패턴이 GitHub 토큰, AWS 키, 개인키, `sk-` 키 네 가지뿐입니다.
+열린 작업은 GitHub Issue로 관리합니다: https://github.com/kjiae0114/desktop-mcp/issues
+
+- [ ] [#3](https://github.com/kjiae0114/desktop-mcp/issues/3) `dev_automation/runs.py`(백그라운드 실행 이력·로그·취소)를 CLI나 MCP 도구에 연결합니다. 지금은 테스트만 있고 호출하는 곳이 없습니다.
+- [ ] [#4](https://github.com/kjiae0114/desktop-mcp/issues/4) `coordinate_picker.py`의 좌표 변환을 함수로 분리해 테스트를 붙입니다.
+- [ ] [#5](https://github.com/kjiae0114/desktop-mcp/issues/5) Claude Desktop 실제 연결과 클릭·입력이 화면에 반영되는지를 사람이 점검합니다. 자동 E2E는 없습니다.
+- [ ] [#6](https://github.com/kjiae0114/desktop-mcp/issues/6) 비밀값 검사 패턴을 넓힙니다. 지금은 GitHub 토큰, AWS 키, 개인키, `sk-` 키 네 가지만 검사합니다.
+
+끝난 항목:
+
+- [x] HTTP 모드 인증: `DESKTOP_MCP_TOKEN` Bearer 토큰 검사 (2026-11-06)
+- [x] GitHub Actions CI (windows-latest) (2026-11-06)
+- [x] 새 clone에서 README대로 설치 검증 (2026-11-06)
+- [x] 정리: `.venv`, `.bak`, `update.finished`, 병합된 로컬 브랜치 7개 삭제 (2026-11-06). `runs/agent/*` 기록 4개는 README 성공률의 근거라 남김
