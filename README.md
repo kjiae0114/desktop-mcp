@@ -89,7 +89,58 @@ docker image ls desktop-mcp-sandbox   # py312 태그가 보이면 완료
 
 ### 3-2. 예시: 함수 하나 만들기
 
-`tests/test_textutil.py`에 정답지를 씁니다. 커밋하지 않아도 됩니다.
+어느 예시든 순서는 같습니다. **① 정답지(테스트 파일)를 만들고 → ② 명령을 실행합니다.** 정답지는 커밋하지 않아도 됩니다. 아래 예시는 2026-11-06에 실제로 실행해 모두 성공했고, 각각 2분 안팎 걸렸습니다.
+
+#### 가장 쉬운 예시 ①: 짧게 시키기
+
+`tests/test_mathutil.py`:
+
+```python
+from dev_automation.mathutil import add
+
+
+def test_add():
+    assert add(2, 3) == 5
+    assert add(-1, 1) == 0
+```
+
+```powershell
+.\.venv-new\Scripts\python.exe -m dev_automation agent desktop-mcp "dev_automation/mathutil.py에 add(a, b) 함수를 만들어줘" --test tests/test_mathutil.py
+```
+
+결과: 성공, 111초. 만든 코드는 `return a + b` 두 줄이었습니다.
+
+#### 가장 쉬운 예시 ②: 평소 말하듯이 시키기
+
+`tests/test_sizeutil.py`:
+
+```python
+from dev_automation.sizeutil import human_size
+
+
+def test_bytes():
+    assert human_size(500) == "500B"
+
+
+def test_kilobytes():
+    assert human_size(1536) == "1.5KB"
+
+
+def test_megabytes():
+    assert human_size(5 * 1024 * 1024) == "5.0MB"
+```
+
+```powershell
+.\.venv-new\Scripts\python.exe -m dev_automation agent desktop-mcp "파일 크기를 사람이 읽기 좋게 바꿔주는 함수가 필요해. 1536 넣으면 1.5KB 나오게. dev_automation/sizeutil.py에 human_size로 만들어줘" --test tests/test_sizeutil.py
+```
+
+결과: 성공, 108초. B·KB·MB를 나누는 8줄짜리 함수를 만들었습니다.
+
+말투는 편해도 됩니다. 다만 **파일 경로**와 **함수 이름**은 꼭 넣고, 예시 입력·출력("1536 넣으면 1.5KB")을 하나 넣으면 성공률이 올라갑니다. 정답지에는 문장에 없는 경우(500B, 5.0MB)도 넣어 둘 수 있습니다. 모델은 정답지를 읽고 맞춥니다.
+
+#### 조금 더 자세한 예시 ③: 정답지를 보라고 시키기
+
+`tests/test_textutil.py`에 정답지를 씁니다.
 
 ```python
 import pytest
