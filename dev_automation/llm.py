@@ -35,13 +35,16 @@ class OllamaClient:
         base_url: str = "http://127.0.0.1:11434",
         timeout: float = 600,
         num_ctx: int = 8192,
+        keep_alive: str = "5m",
     ) -> None:
         if urlparse(base_url).hostname not in LOCAL_HOSTS:
             raise ValueError(f"로컬 호스트(127.0.0.1, localhost)만 허용됩니다: {base_url}")
         self._model = model
-        self._url = base_url.rstrip("/") + "/api/chat"
+        self._base = base_url.rstrip("/")
+        self._url = self._base + "/api/chat"
         self._timeout = timeout
         self._num_ctx = num_ctx
+        self._keep_alive = keep_alive
 
     def chat(self, messages: list[dict], tools: list[dict]) -> dict:
         body = {
@@ -50,6 +53,7 @@ class OllamaClient:
             "tools": tools,
             "stream": False,
             "think": False,
+            "keep_alive": self._keep_alive,
             "options": {"temperature": 0.2, "num_ctx": self._num_ctx},
         }
         request = Request(
@@ -76,3 +80,21 @@ class OllamaClient:
                 "arguments": _parse_arguments(function.get("arguments")),
             })
         return {"content": message.get("content") or "", "tool_calls": tool_calls}
+
+    def unload(self) -> None:
+        """모델을 GPU·메모리에서 바로 내린다. 실패해도 작업 결과에는 영향이 없으므로 무시한다.
+
+        Ollama는 마지막 요청 뒤 keep_alive(기본 5분) 동안 모델을 올려 둔다.
+        에이전트가 끝난 뒤 그 시간 동안 VRAM 약 4GB를 붙잡지 않도록 끝날 때 호출한다.
+        """
+        body = {"model": self._model, "keep_alive": 0}
+        request = Request(
+            self._base + "/api/generate",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urlopen(request, timeout=30) as response:
+                response.read()
+        except (URLError, OSError):
+            pass

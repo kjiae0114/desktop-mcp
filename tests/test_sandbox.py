@@ -220,7 +220,7 @@ def _cli(monkeypatch, project):
     from dev_automation import __main__ as cli
 
     monkeypatch.setattr(cli, "load_projects", lambda path: {"demo": project})
-    monkeypatch.setattr(cli, "OllamaClient", lambda model: object())
+    monkeypatch.setattr(cli, "OllamaClient", lambda model: SimpleNamespace(unload=lambda: None))
     captured = {"called": False}
 
     def fake_run_task(project, task, llm, runs_dir, **kwargs):
