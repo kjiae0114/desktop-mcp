@@ -4,10 +4,13 @@
 실행:
     python desktop_mcp.py            # Claude Desktop 등록용(stdio)
     python desktop_mcp.py --http     # http://127.0.0.1:8765/mcp (streamable-http)
+                                     # HTTP는 환경변수 DESKTOP_MCP_TOKEN(16자 이상) 필수
 """
 
 import argparse
+import hmac
 import io
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -267,16 +270,74 @@ def terminal(command: str) -> dict:
     }
 
 
+TOKEN_ENV = "DESKTOP_MCP_TOKEN"
+MIN_TOKEN_LENGTH = 16
+
+
+class BearerTokenMiddleware:
+    """HTTP 요청마다 `Authorization: Bearer <토큰>` 헤더를 검사하는 ASGI 미들웨어."""
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self._expected = f"Bearer {token}".encode()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            supplied = dict(scope.get("headers") or []).get(b"authorization", b"")
+            if not hmac.compare_digest(supplied, self._expected):
+                await send({
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [
+                        (b"content-type", b"text/plain; charset=utf-8"),
+                        (b"www-authenticate", b"Bearer"),
+                    ],
+                })
+                await send({"type": "http.response.body", "body": "인증 실패".encode()})
+                return
+        await self.app(scope, receive, send)
+
+
+def http_token_from_env() -> str:
+    """HTTP 모드에서 쓸 토큰을 환경변수에서 읽는다. 없거나 짧으면 실행을 거부한다."""
+    token = os.environ.get(TOKEN_ENV, "").strip()
+    if len(token) < MIN_TOKEN_LENGTH:
+        raise SystemExit(
+            f"HTTP 모드에는 {MIN_TOKEN_LENGTH}자 이상의 토큰이 필요합니다. "
+            f"환경변수 {TOKEN_ENV}를 설정하세요. "
+            "예: $env:DESKTOP_MCP_TOKEN = python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+        )
+    return token
+
+
+def build_http_app(token: str):
+    """토큰 검사를 씌운 streamable-http 앱을 만든다."""
+    return BearerTokenMiddleware(mcp.streamable_http_app(), token)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Windows 데스크톱 제어 MCP 서버")
     parser.add_argument(
         "--http", action="store_true",
-        help="stdio 대신 http://127.0.0.1:8765/mcp 로 서비스한다(로컬 전용).",
+        help=f"stdio 대신 http://127.0.0.1:8765/mcp 로 서비스한다(로컬 전용, {TOKEN_ENV} 필요).",
     )
     args = parser.parse_args(argv)
 
+    if args.http:
+        token = http_token_from_env()  # 토큰이 없으면 여기서 종료한다.
+        WORKSPACE.mkdir(parents=True, exist_ok=True)
+        import uvicorn
+
+        uvicorn.run(
+            build_http_app(token),
+            host=mcp.settings.host,
+            port=mcp.settings.port,
+            log_level="warning",
+        )
+        return
+
     WORKSPACE.mkdir(parents=True, exist_ok=True)
-    mcp.run(transport="streamable-http" if args.http else "stdio")
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
