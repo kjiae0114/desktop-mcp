@@ -1,6 +1,7 @@
 """desktop_mcp 도구 테스트. 실제 마우스·키보드 대신 가짜 GUI 객체를 쓴다."""
 
 import asyncio
+import sys
 
 import pytest
 
@@ -55,7 +56,13 @@ def test_registered_tools():
 
 # --- 경로 정책 -------------------------------------------------------------
 
-@pytest.mark.parametrize("bad", ["..", "../secret.txt", "a/../../x", "C:/Windows/win.ini"])
+@pytest.mark.parametrize("bad", [
+    "..", "../secret.txt", "a/../../x",
+    # 드라이브 경로는 Windows에서만 절대 경로다. 에이전트의 Docker(Linux) 테스트에서는
+    # 작업 폴더 안의 평범한 파일 이름이라 막을 이유가 없다.
+    pytest.param("C:/Windows/win.ini", marks=pytest.mark.skipif(
+        sys.platform != "win32", reason="Windows 드라이브 경로")),
+])
 def test_safe_path_blocks_escape(workspace, bad):
     with pytest.raises(ValueError):
         desktop_mcp.safe_path(bad)
