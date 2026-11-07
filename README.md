@@ -308,6 +308,94 @@ RTX 4050 Laptop(6GB), i5-13500HX, RAM 14GB에서 2026-11-06에 잰 값입니다.
 - 성공률을 가르는 건 **정답지를 누가 먼저 쓰느냐**입니다. 사람이나 더 강한 AI가 테스트를 쓰고, 이 에이전트가 구현하는 분업이 가장 확실합니다(정답지를 주면 10/10).
 - 모델이 도구 호출을 본문에 JSON으로 쓰는 경우도 이제 알아듣습니다(`llm.py`). 다른 모델로 바꿀 때 0점이 나오던 원인입니다.
 
+### 3-10. ChatGPT에 정답지 맡기기 (반자동, 무료)
+
+3-9절의 결론대로 "정답지는 강한 AI가, 구현은 로컬 에이전트가" 나눠 맡는 흐름입니다. ChatGPT 웹(무료)을 그대로 쓰고, 사람은 **붙여넣기 두 번**만 합니다. API 키도 비용도 필요 없습니다.
+
+#### 작동 원리
+
+1. **요청문 만들기(`brief`)**: 요구사항에 저장소 지도(파일 목록, 클래스·함수 선언)를 붙여 "이 요구사항을 검증하는 pytest 테스트만 써 달라"는 요청문을 만들고 클립보드에 복사합니다. 지도가 있어야 ChatGPT가 실제 모듈 경로와 함수 이름으로 테스트를 씁니다. `.gitignore`에 있는 파일은 지도에 넣지 않습니다.
+2. **답장 검사(`implement`)**: 클립보드의 답장에서 테스트 파일만 꺼냅니다. 바깥에서 온 코드이므로 믿지 않고 검사합니다.
+   - 경로는 `tests/` 아래 `test_*.py`만 허용합니다(`..`, 절대 경로, 숨김 폴더 거부).
+   - 파일마다 100KB 이하, 최대 10개, 문법 오류 없음, `test_` 함수가 있어야 합니다.
+   - 이미 있는 파일은 덮어쓰지 않습니다(이 흐름이 전에 쓴 파일만 예외).
+3. **구현**: 테스트를 프로젝트에 두고 `--test`로 잠근 채 로컬 에이전트를 돌립니다. 모델은 테스트를 고칠 수 없고, 테스트는 **네트워크가 끊긴 Docker 샌드박스 안에서만** 실행합니다. 그래서 sandbox가 없는 프로젝트에는 이 흐름을 쓸 수 없습니다.
+4. **뒷정리**: 끝나면 프로젝트에 둔 테스트 파일을 지웁니다(성공했다면 작업 브랜치에 커밋돼 있음). 사람이 그 사이 내용을 바꿨다면 지우지 않습니다.
+5. **실패하면 재요청문(`copy`)**: 테스트가 틀렸을 수도 있으므로, 지금 테스트와 실패 출력을 붙인 재요청문을 만듭니다. ChatGPT가 테스트를 고치거나 "테스트가 맞다"며 그대로 다시 보내면 `implement`로 다시 구현합니다.
+
+#### 상호작용 도식
+
+```mermaid
+sequenceDiagram
+    actor 사람
+    participant CLI as dev_automation (내 PC)
+    participant GPT as ChatGPT 웹
+    participant Agent as 로컬 에이전트 (Ollama 4B)
+    participant Box as Docker 샌드박스 (네트워크 없음)
+
+    사람->>CLI: brief desktop-mcp "요구사항"
+    CLI->>CLI: 저장소 지도 생성 + 요청문 저장
+    CLI-->>사람: 요청문을 클립보드에 복사
+    사람->>GPT: 붙여넣기 ①
+    GPT-->>사람: 테스트 파일 답장
+    사람->>CLI: 답장 복사 후 implement <요청 ID>
+    CLI->>CLI: 답장 검사 (경로·크기·문법)
+    CLI->>Agent: 테스트를 잠그고 구현 요청
+    loop 최대 25단계
+        Agent->>Agent: 파일 읽기·수정
+        Agent->>Box: 테스트 실행
+        Box-->>Agent: 결과
+    end
+    alt 잠근 테스트 통과
+        Agent-->>CLI: agent/... 브랜치에 커밋
+        CLI-->>사람: 성공, 브랜치 검토 후 직접 병합
+    else 실패
+        CLI->>CLI: 재요청문 생성 (테스트 + 실패 출력)
+        CLI-->>사람: copy <요청 ID> 안내
+        사람->>GPT: 붙여넣기 ② (같은 대화)
+        GPT-->>사람: 고친 테스트 또는 그대로
+        사람->>CLI: implement <요청 ID> (다시)
+    end
+```
+
+내 PC 밖으로 나가는 것은 **사람이 직접 붙여넣는 요청문뿐**입니다. 요청문에는 요구사항과 저장소 지도(파일 이름, 함수 선언과 첫 줄 설명)가 들어가고, 함수 본문 코드는 들어가지 않습니다. 붙여넣기 전에 `prompt.md`를 열어 볼 수 있습니다.
+
+#### 사용법
+
+```powershell
+# 1) 요청문 만들기 → 클립보드에 복사됨
+.\.venv-new\Scripts\python.exe -m dev_automation brief desktop-mcp "dev_automation/textutil.py에 truncate(text, width) 함수를 만들어줘. 길면 잘라서 끝에 '…'을 붙여 전체 길이를 width로, 짧거나 같으면 그대로. width가 1보다 작으면 ValueError."
+
+# 2) ChatGPT에 붙여넣고, 답장 아래 복사 버튼으로 답장 전체를 복사
+
+# 3) 구현 (클립보드의 답장을 읽음. --background로 백그라운드 실행 가능)
+.\.venv-new\Scripts\python.exe -m dev_automation implement brief-20261107-152435-90cc
+
+# 실패했을 때: 재요청문 복사 → ChatGPT 같은 대화에 붙여넣기 → 새 답장 복사 → 3)을 다시
+.\.venv-new\Scripts\python.exe -m dev_automation copy brief-20261107-152435-90cc
+
+# 요청 목록과 상태
+.\.venv-new\Scripts\python.exe -m dev_automation briefs
+```
+
+| 명령 | 하는 일 |
+|---|---|
+| `brief <프로젝트> "<요구사항>"` | 요청문 생성, 클립보드 복사(`--no-copy`로 끔) |
+| `implement <요청 ID>` | 클립보드(또는 `--reply 파일`)의 답장 검사 → 구현. `--background`, `--model`, `--max-steps` 지원 |
+| `copy <요청 ID>` | 마지막 요청문(실패 후에는 재요청문)을 다시 복사 |
+| `briefs` | 요청 목록: `waiting_reply`(답장 대기), `implementing`, `succeeded`(브랜치 표시) |
+
+기록은 `runs/briefs/<요청 ID>/`에 남습니다: `prompt.md`, `reply-1.md`, `tests-1/`(받은 테스트 사본), `retry-1.md`, `brief.json`. Git에 올라가지 않습니다.
+
+**2026-11-07 실제 확인** (ChatGPT 대신 Claude가 같은 형식의 답장을 써서 시험):
+
+| 경우 | 결과 |
+|---|---|
+| 올바른 테스트 6개(truncate) | 백그라운드 구현 성공, 약 2분. 작업 폴더의 테스트는 정리되고 브랜치에만 남음 |
+| 일부러 모순된 테스트 | 수정 3회 후 실패(약 5분) → 재요청문에 테스트와 `AssertionError` 출력이 담김, 상태 `waiting_reply` |
+
+실제 ChatGPT 답장으로는 아직 시험하지 않았습니다. 답장 형식이 다르면 `implement`가 "테스트 파일을 찾지 못했습니다"라고 알려 줍니다. 그때는 ChatGPT에 "코드 블록 첫 줄에 `# 파일: tests/...`를 넣어 달라"고 하면 됩니다.
+
 ## 4. 화면 제어 MCP 서버 사용법
 
 ### 4-1. 실행 방식 두 가지
@@ -466,6 +554,7 @@ docker build -t my-app-sandbox:py312 -f C:\programming\02_tools\desktop-mcp\sand
 | `projects.py` | `config/projects.json` 검증, 명령 프로파일 정의 |
 | `paths.py` | 프로젝트 밖 경로, 링크·정션 탈출 차단 |
 | `jobs.py` | 에이전트 백그라운드 실행(`--background`), 목록·로그·취소 |
+| `handoff.py` | ChatGPT 반자동 흐름: 요청문 생성, 답장 검사, 테스트 배치·정리, 재요청문 |
 | `context.py` | 저장소 지도(파일·선언)와 정답지·관련 파일을 묶은 첫 메시지 요약(`--context`) |
 | `spec.py` | 요구사항으로 테스트를 먼저 쓰는 실험 기능. 벤치마크 `--spec-first`에서만 씀(측정 결과 1/10) |
 | `runs.py` | 오래 떠 있는 서버용으로 만든 명령 실행 이력 관리. **쓰는 곳 없음**(CLI 백그라운드는 `jobs.py`가 담당) |
