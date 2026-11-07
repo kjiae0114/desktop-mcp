@@ -241,6 +241,31 @@ RTX 4050 Laptop(6GB), i5-13500HX, RAM 14GB에서 2026-11-06에 잰 값입니다.
 - `num_ctx`를 8192에서 4096으로 줄여도 VRAM은 약 210MB만 줄어듭니다. 대화가 잘릴 위험이 있으므로 8192를 유지합니다(대화 기록 상한 24,000자).
 - 플래시 어텐션은 이미 켜져 있습니다(`flash_attn = auto`). 모델이 다 올라가 있는지는 `ollama ps`의 PROCESSOR가 `100% GPU`인지로 확인합니다.
 
+### 3-8. 백그라운드로 돌리기
+
+작업은 2~3분 걸립니다. 기다리지 않으려면 명령 끝에 `--background`를 붙입니다. 바로 돌아오고, 터미널을 닫아도 계속 돕니다.
+
+```powershell
+.\.venv-new\Scripts\python.exe -m dev_automation agent desktop-mcp "dev_automation/mathutil.py에 add(a, b) 함수를 만들어줘" --test tests/test_mathutil.py --background
+```
+
+```
+백그라운드로 시작했습니다: job-20261107-120257-d733 (PID 9000)
+```
+
+| 하고 싶은 것 | 명령 |
+|---|---|
+| 목록과 상태 보기 | `.\.venv-new\Scripts\python.exe -m dev_automation jobs` |
+| 출력 보기 | `.\.venv-new\Scripts\python.exe -m dev_automation log <작업 ID>` |
+| 끝날 때까지 출력 따라가기 | `... log <작업 ID> -f` (Ctrl+C로 보기만 멈춤, 작업은 계속) |
+| 취소 | `.\.venv-new\Scripts\python.exe -m dev_automation cancel <작업 ID>` |
+
+- 상태: `running`(실행 중), `succeeded`(성공, 목록에 브랜치 표시), `failed`(실패), `cancelled`(취소됨), `interrupted`(PC 재부팅 등으로 결과 없이 끝남).
+- 성공하면 3-4절처럼 브랜치를 확인하고 병합합니다. 백그라운드라고 해서 push나 병합을 하지는 않습니다.
+- 취소하면 다음 진행 지점(모델 응답 직후)에서 멈추고, 작업 브랜치와 워크트리를 지우고, 모델을 내립니다. 테스트가 도는 중이었다면 그 테스트가 끝난 뒤 멈춥니다. 2026-11-07 실측: 취소 요청 후 2.5초 만에 정리가 끝났습니다.
+- 기록은 `runs/jobs/<작업 ID>/`에 남습니다(`job.json`, `output.log`). Git에 올라가지 않으며 지워도 됩니다.
+- 여러 개를 동시에 돌릴 수는 있지만 모델 하나를 같이 써서 번갈아 처리되므로 하나씩 돌리는 게 낫습니다. 동시에 시작하면 경고가 나옵니다.
+
 ## 4. 화면 제어 MCP 서버 사용법
 
 ### 4-1. 실행 방식 두 가지
@@ -398,7 +423,8 @@ docker build -t my-app-sandbox:py312 -f C:\programming\02_tools\desktop-mcp\sand
 | `runner.py` | 등록된 명령만 셸 없이 실행. 시간·로그 크기 제한, 자식 프로세스까지 종료 |
 | `projects.py` | `config/projects.json` 검증, 명령 프로파일 정의 |
 | `paths.py` | 프로젝트 밖 경로, 링크·정션 탈출 차단 |
-| `runs.py` | 백그라운드 실행 이력·로그·취소. **아직 어디에도 연결되지 않음** |
+| `jobs.py` | 에이전트 백그라운드 실행(`--background`), 목록·로그·취소 |
+| `runs.py` | 오래 떠 있는 서버용으로 만든 명령 실행 이력 관리. **쓰는 곳 없음**(CLI 백그라운드는 `jobs.py`가 담당) |
 
 ## 7. 문제 해결
 
@@ -460,7 +486,7 @@ docker build -t my-app-sandbox:py312 -f C:\programming\02_tools\desktop-mcp\sand
 | 테스트 약화 | `--test` 없이 실행하면 모델이 테스트를 고쳐 통과시킬 수 있음(경고는 나옴) |
 | 비밀값 검사 | GitHub 토큰, AWS 키, 개인키, `sk-` 키 패턴만 검사. 그 밖의 비밀번호 문자열은 못 잡음 |
 | MCP 서버 | HTTP 방식은 고정 토큰 하나만 검사(사용자 구분·만료 없음). 입력값 검사는 가짜 GUI로 테스트하지만 실제 클릭·입력이 화면에 반영되는지는 자동 테스트 없음 |
-| 미완성 | `runs.py`(백그라운드 실행 이력)는 만들었지만 MCP 도구로 연결하지 않음 |
+| 미사용 코드 | `runs.py`는 쓰는 곳이 없음. 백그라운드 실행은 `jobs.py`로 대신함 |
 
 ## 10. 인수인계 체크리스트
 

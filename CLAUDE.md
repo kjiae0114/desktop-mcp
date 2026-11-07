@@ -17,7 +17,8 @@ Windows 전용 개인 도구입니다. 서로 호출하지 않는 프로그램 �
 .\.venv-new\Scripts\python.exe -m pytest tests/test_desktop_mcp.py   # 일부만
 .\.venv-new\Scripts\python.exe desktop_mcp.py          # MCP 서버 (stdio)
 .\.venv-new\Scripts\python.exe desktop_mcp.py --http   # MCP 서버 (http://127.0.0.1:8765/mcp, $env:DESKTOP_MCP_TOKEN 16자 이상 필수)
-.\.venv-new\Scripts\python.exe -m dev_automation agent desktop-mcp "<작업>" --test <잠글 테스트>
+.\.venv-new\Scripts\python.exe -m dev_automation agent desktop-mcp "<작업>" --test <잠글 테스트> [--background]
+.\.venv-new\Scripts\python.exe -m dev_automation jobs | log <id> [-f] | cancel <id>
 ```
 
 - CI는 `.github/workflows/test.yml`입니다(push to main과 PR). `pytest` job은 windows-latest(Docker 테스트 skip), `linux-sandbox` job은 ubuntu에서 샌드박스 이미지를 빌드해 `scripts/sandbox_baseline.py`(에이전트 기준 테스트 재현)와 Docker 통합 테스트까지 돌립니다. 테스트는 Windows와 Linux 양쪽에서 통과해야 합니다. 에이전트가 Linux 컨테이너에서 기준 테스트를 돌리기 때문입니다.
@@ -32,7 +33,8 @@ Windows 전용 개인 도구입니다. 서로 호출하지 않는 프로그램 �
 |---|---|
 | `desktop_mcp.py` | MCP 도구 12개. GUI는 `_gui()`, 클립보드는 `_clipboard_copy()`로만 접근 (테스트에서 교체) |
 | `coordinate_picker.py` | 클릭 좌표를 고르는 tkinter 창 (테스트 없음) |
-| `dev_automation/__main__.py` | CLI (`agent` 하위 명령) |
+| `dev_automation/__main__.py` | CLI (`agent [--background]`, `jobs`, `log`, `cancel`) |
+| `dev_automation/jobs.py` | 에이전트 백그라운드 프로세스. `runs/jobs/<id>/`에 job.json·output.log, `cancel` 파일로 취소 |
 | `dev_automation/agent.py` | 워크트리 → 기준 테스트 → 모델 루프 → 최종 테스트 → 비밀값·잠금 검사 → 커밋 |
 | `dev_automation/agent_tools.py` | 모델용 파일 도구와 차단 경로 |
 | `dev_automation/llm.py` | Ollama 클라이언트 (localhost만) |
@@ -40,7 +42,7 @@ Windows 전용 개인 도구입니다. 서로 호출하지 않는 프로그램 �
 | `dev_automation/runner.py` | 허용된 명령만 실행, 시간·로그 제한 |
 | `dev_automation/projects.py` | `config/projects.json` 검증, `COMMAND_PROFILES` |
 | `dev_automation/paths.py` | 경로 탈출 차단 |
-| `dev_automation/runs.py` | 백그라운드 실행 이력 (미연결) |
+| `dev_automation/runs.py` | 서버용 명령 실행 이력 (쓰는 곳 없음, CLI 백그라운드는 jobs.py) |
 | `tests/` | pytest. `test_desktop_mcp.py`는 가짜 GUI와 실제 stdio 서버 기동 |
 | `sandbox/python.Dockerfile` | 테스트 이미지 `desktop-mcp-sandbox:py312` |
 
@@ -50,14 +52,15 @@ Windows 전용 개인 도구입니다. 서로 호출하지 않는 프로그램 �
 - MCP 도구를 추가하거나 이름을 바꾸면 `tests/test_desktop_mcp.py::test_registered_tools`, 개수 확인(`len(names) == 12`), `tests/test_runner.py::test_existing_desktop_mcp_is_unaffected`를 함께 고칩니다.
 - `desktop_mcp.py`를 import할 때 화면이 필요하면 안 됩니다. Docker 테스트 이미지에는 화면이 없습니다. 그래서 `pyautogui`는 모듈 맨 위에서 import하지 않습니다.
 - stdio 모드에서는 stdout이 MCP 통신에 쓰입니다. 서버 코드에서 `print`를 쓰지 않습니다.
-- 에이전트는 push와 병합을 하지 않습니다. 이 규칙을 바꾸지 않습니다.
+- 에이전트는 push와 병합을 하지 않습니다. 이 규칙을 바꾸지 않습니다. 백그라운드 실행도 같습니다.
+- 백그라운드 취소는 `on_progress`에서 `TaskCancelled`를 던지는 방식입니다. 강제 종료(taskkill)를 쓰지 않는 이유는 워크트리·브랜치·모델 정리를 건너뛰기 때문입니다.
 - `config/projects.json`에 PC 절대 경로가 들어가면 공개 저장소에 올리지 않습니다.
 
 ## 남은 할 일 (TODO)
 
 열린 작업은 GitHub Issue로 관리합니다: https://github.com/kjiae0114/desktop-mcp/issues
 
-- [ ] [#3](https://github.com/kjiae0114/desktop-mcp/issues/3) `dev_automation/runs.py`(백그라운드 실행 이력·로그·취소)를 CLI나 MCP 도구에 연결합니다. 지금은 테스트만 있고 호출하는 곳이 없습니다.
+- [ ] [#3](https://github.com/kjiae0114/desktop-mcp/issues/3) 백그라운드 실행은 `jobs.py`로 해결(2026-11-07). 남은 결정: 쓰는 곳 없는 `runs.py`를 지울지.
 - [ ] [#4](https://github.com/kjiae0114/desktop-mcp/issues/4) `coordinate_picker.py`의 좌표 변환을 함수로 분리해 테스트를 붙입니다.
 - [ ] [#5](https://github.com/kjiae0114/desktop-mcp/issues/5) Claude Desktop 실제 연결과 클릭·입력이 화면에 반영되는지를 사람이 점검합니다. 자동 E2E는 없습니다.
 - [ ] [#6](https://github.com/kjiae0114/desktop-mcp/issues/6) 비밀값 검사 패턴을 넓힙니다. 지금은 GitHub 토큰, AWS 키, 개인키, `sk-` 키 네 가지만 검사합니다.
