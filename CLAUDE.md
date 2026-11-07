@@ -19,6 +19,8 @@ Windows 전용 개인 도구입니다. 서로 호출하지 않는 프로그램 �
 .\.venv-new\Scripts\python.exe desktop_mcp.py --http   # MCP 서버 (http://127.0.0.1:8765/mcp, $env:DESKTOP_MCP_TOKEN 16자 이상 필수)
 .\.venv-new\Scripts\python.exe -m dev_automation agent desktop-mcp "<작업>" --test <잠글 테스트> [--background]
 .\.venv-new\Scripts\python.exe -m dev_automation jobs | log <id> [-f] | cancel <id>
+.\.venv-new\Scripts\python.exe -m dev_automation brief <프로젝트> "<요구사항>"   # ChatGPT 반자동 흐름(README 3-10)
+.\.venv-new\Scripts\python.exe -m dev_automation implement <brief_id> | copy <brief_id> | briefs
 ```
 
 - CI는 `.github/workflows/test.yml`입니다(push to main과 PR). `pytest` job은 windows-latest(Docker 테스트 skip), `linux-sandbox` job은 ubuntu에서 샌드박스 이미지를 빌드해 `scripts/sandbox_baseline.py`(에이전트 기준 테스트 재현)와 Docker 통합 테스트까지 돌립니다. 테스트는 Windows와 Linux 양쪽에서 통과해야 합니다. 에이전트가 Linux 컨테이너에서 기준 테스트를 돌리기 때문입니다.
@@ -34,6 +36,7 @@ Windows 전용 개인 도구입니다. 서로 호출하지 않는 프로그램 �
 | `desktop_mcp.py` | MCP 도구 12개. GUI는 `_gui()`, 클립보드는 `_clipboard_copy()`로만 접근 (테스트에서 교체) |
 | `coordinate_picker.py` | 클릭 좌표를 고르는 tkinter 창 (테스트 없음) |
 | `dev_automation/__main__.py` | CLI (`agent [--background]`, `jobs`, `log`, `cancel`) |
+| `dev_automation/handoff.py` | ChatGPT에 테스트 작성을 맡기는 반자동 흐름. 답장은 믿지 않는 입력: tests/test_*.py만, 크기·문법 검사, sandbox 필수 |
 | `dev_automation/context.py` | 첫 메시지용 저장소 요약 (`--context`, 기본 끔) |
 | `dev_automation/spec.py` | 요구사항→테스트 먼저 쓰기 실험. 벤치마크 전용 |
 | `dev_automation/jobs.py` | 에이전트 백그라운드 프로세스. `runs/jobs/<id>/`에 job.json·output.log, `cancel` 파일로 취소 |
@@ -58,6 +61,7 @@ Windows 전용 개인 도구입니다. 서로 호출하지 않는 프로그램 �
 - `desktop_mcp.py`를 import할 때 화면이 필요하면 안 됩니다. Docker 테스트 이미지에는 화면이 없습니다. 그래서 `pyautogui`는 모듈 맨 위에서 import하지 않습니다.
 - stdio 모드에서는 stdout이 MCP 통신에 쓰입니다. 서버 코드에서 `print`를 쓰지 않습니다.
 - 에이전트는 push와 병합을 하지 않습니다. 이 규칙을 바꾸지 않습니다. 백그라운드 실행도 같습니다.
+- `implement`는 바깥 AI가 쓴 테스트를 실행하므로 sandbox 없는 프로젝트에서는 거부합니다. 이 검사를 빼지 않습니다. ChatGPT 웹 화면을 프로그램으로 조작하는 자동화는 약관 위반이라 만들지 않습니다.
 - 백그라운드 취소는 `on_progress`에서 `TaskCancelled`를 던지는 방식입니다. 강제 종료(taskkill)를 쓰지 않는 이유는 워크트리·브랜치·모델 정리를 건너뛰기 때문입니다.
 - `config/projects.json`에 PC 절대 경로가 들어가면 공개 저장소에 올리지 않습니다.
 

@@ -4,6 +4,12 @@
   python -m dev_automation jobs              # 백그라운드 작업 목록
   python -m dev_automation log <job_id> [-f] # 출력 보기 (-f: 끝날 때까지 따라가기)
   python -m dev_automation cancel <job_id>   # 취소 요청
+
+  ChatGPT에 테스트 작성을 맡기는 반자동 흐름:
+  python -m dev_automation brief <project_id> "<요구사항>"   # 요청문을 만들어 클립보드에 복사
+  python -m dev_automation implement <brief_id> [--background] # 클립보드의 답장으로 구현
+  python -m dev_automation copy <brief_id>                     # 마지막 요청문(재요청 포함) 다시 복사
+  python -m dev_automation briefs                              # 요청 목록
 """
 
 import argparse
@@ -12,7 +18,7 @@ from pathlib import Path
 import sys
 import time
 
-from dev_automation import jobs
+from dev_automation import handoff, jobs
 from dev_automation.agent import CONTEXT_CHARS_WHEN_ON, SUCCEEDED, run_task
 from dev_automation.llm import OllamaClient
 from dev_automation.projects import ProjectConfigError, load_projects
@@ -20,6 +26,25 @@ from dev_automation.sandbox import DockerSandbox
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 JOBS_DIR = REPO_ROOT / "runs" / "jobs"
+BRIEFS_DIR = REPO_ROOT / "runs" / "briefs"
+DEFAULT_CONFIG = str(REPO_ROOT / "config" / "projects.json")
+DEFAULT_MODEL = "qwen3.5:4b-q4_K_M"
+
+
+def _copy_to_clipboard(text: str) -> bool:
+    try:
+        import pyperclip
+
+        pyperclip.copy(text)
+        return True
+    except Exception:
+        return False
+
+
+def _read_clipboard() -> str:
+    import pyperclip
+
+    return pyperclip.paste() or ""
 
 
 def _progress(message: str) -> None:
@@ -32,8 +57,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     agent = commands.add_parser("agent", help="로컬 모델로 코드 수정 작업을 실행한다.")
     agent.add_argument("project_id")
     agent.add_argument("task")
-    agent.add_argument("--model", default="qwen3.5:4b-q4_K_M")
-    agent.add_argument("--config", default=str(REPO_ROOT / "config" / "projects.json"))
+    agent.add_argument("--model", default=DEFAULT_MODEL)
+    agent.add_argument("--config", default=DEFAULT_CONFIG)
     agent.add_argument("--runs-dir", default=str(REPO_ROOT / "runs" / "agent"))
     agent.add_argument("--max-steps", type=int, default=25)
     agent.add_argument(
@@ -58,6 +83,26 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     # 백그라운드 자식 프로세스에만 붙는 내부 옵션
     agent.add_argument("--job-dir", help=argparse.SUPPRESS)
+    # implement가 넘기는 내부 옵션: 끝난 뒤 테스트 정리와 재요청문 작성에 쓴다
+    agent.add_argument("--brief-id", help=argparse.SUPPRESS)
+
+    brief = commands.add_parser("brief", help="ChatGPT에 보낼 테스트 작성 요청문을 만든다.")
+    brief.add_argument("project_id")
+    brief.add_argument("requirement")
+    brief.add_argument("--config", default=DEFAULT_CONFIG)
+    brief.add_argument("--no-copy", action="store_true", help="클립보드에 복사하지 않는다.")
+    implement = commands.add_parser(
+        "implement", help="ChatGPT 답장의 테스트로 로컬 에이전트를 돌린다(답장은 클립보드에서 읽음)."
+    )
+    implement.add_argument("brief_id")
+    implement.add_argument("--reply", metavar="파일", help="클립보드 대신 이 파일에서 답장을 읽는다.")
+    implement.add_argument("--background", action="store_true")
+    implement.add_argument("--model", default=DEFAULT_MODEL)
+    implement.add_argument("--max-steps", type=int, default=25)
+    implement.add_argument("--config", default=DEFAULT_CONFIG)
+    copy = commands.add_parser("copy", help="요청의 마지막 요청문(재요청 포함)을 다시 복사한다.")
+    copy.add_argument("brief_id")
+    commands.add_parser("briefs", help="요청 목록을 본다.")
 
     commands.add_parser("jobs", help="백그라운드 작업 목록을 본다.")
     log = commands.add_parser("log", help="백그라운드 작업의 출력을 본다.")
@@ -140,6 +185,129 @@ def _cmd_cancel(job_id: str) -> int:
     return 0
 
 
+def _cmd_brief(args: argparse.Namespace) -> int:
+    try:
+        projects = load_projects(args.config)
+    except ProjectConfigError as exc:
+        _progress(f"설정 오류: {exc}")
+        return 1
+    project = projects.get(args.project_id)
+    if project is None:
+        _progress(f"등록되지 않은 프로젝트입니다: {args.project_id}")
+        return 1
+    try:
+        brief_id, prompt = handoff.create_brief(BRIEFS_DIR, args.project_id, project.root, args.requirement)
+    except handoff.HandoffError as exc:
+        _progress(str(exc))
+        return 1
+    copied = not args.no_copy and _copy_to_clipboard(prompt)
+    _progress(f"요청문을 만들었습니다: {brief_id} ({len(prompt)}자)")
+    _progress(f"  파일: {BRIEFS_DIR / brief_id / 'prompt.md'}")
+    _progress("  클립보드에 복사했습니다." if copied else "  클립보드 복사는 하지 않았습니다. 위 파일을 열어 복사하세요.")
+    _progress("\n다음 순서:")
+    _progress("  1. ChatGPT에 붙여넣고 보냅니다.")
+    _progress("  2. 답장 전체를 복사합니다(답장 아래 복사 버튼).")
+    _progress(f"  3. python -m dev_automation implement {brief_id}")
+    return 0
+
+
+def _cmd_copy(brief_id: str) -> int:
+    try:
+        text = handoff.latest_prompt(handoff.brief_dir(BRIEFS_DIR, brief_id))
+    except (handoff.HandoffError, OSError) as exc:
+        _progress(str(exc))
+        return 1
+    if _copy_to_clipboard(text):
+        _progress(f"클립보드에 복사했습니다({len(text)}자). ChatGPT의 같은 대화에 붙여넣으세요.")
+        return 0
+    _progress("클립보드에 복사하지 못했습니다.")
+    return 1
+
+
+def _cmd_briefs() -> int:
+    records = handoff.list_briefs(BRIEFS_DIR)
+    if not records:
+        _progress("요청이 없습니다.")
+        return 0
+    for record in records:
+        text = record["requirement"].splitlines()[0]
+        text = text if len(text) <= 40 else text[:39] + "…"
+        _progress(f"{record['brief_id']}  {record['status']:<14}  {record['round']}회  {text}")
+        if record.get("branch"):
+            _progress(f"    브랜치: {record['branch']}")
+    return 0
+
+
+def _cmd_implement(args: argparse.Namespace) -> int:
+    try:
+        path = handoff.brief_dir(BRIEFS_DIR, args.brief_id)
+        record = handoff.load(path)
+        projects = load_projects(args.config)
+    except (handoff.HandoffError, ProjectConfigError, OSError) as exc:
+        _progress(str(exc))
+        return 1
+    project = projects.get(record["project_id"])
+    if project is None:
+        _progress(f"등록되지 않은 프로젝트입니다: {record['project_id']}")
+        return 1
+    if not project.sandbox:
+        # 바깥 AI가 쓴 테스트를 이 PC에서 직접 실행하지 않는다.
+        _progress("이 흐름은 Docker sandbox가 설정된 프로젝트에서만 씁니다(바깥에서 받은 코드를 격리해 실행).")
+        return 1
+    try:
+        if args.reply:
+            reply = Path(args.reply).read_text(encoding="utf-8")
+        else:
+            reply = _read_clipboard()
+        files = handoff.parse_reply(reply)
+    except (handoff.HandoffError, OSError) as exc:
+        _progress(f"답장을 쓸 수 없습니다: {exc}")
+        return 1
+    previous = {name for item in record.get("history", []) for name in item.get("tests", [])}
+    try:
+        handoff.place_tests(project.root, files, previous)
+    except handoff.HandoffError as exc:
+        _progress(str(exc))
+        return 1
+    record = handoff.record_reply(path, reply, files)
+    _progress(f"테스트 {len(files)}개를 받았습니다({record['round']}회차):")
+    for relative, body in files:
+        _progress(f"  {relative} ({body.count('def test_')}개 테스트)")
+
+    agent_argv = [
+        "agent", record["project_id"], record["requirement"],
+        "--model", args.model, "--max-steps", str(args.max_steps), "--config", args.config,
+        "--brief-id", args.brief_id,
+    ]
+    for relative, _ in files:
+        agent_argv += ["--test", relative]
+    if args.background:
+        agent_argv.append("--background")
+    return _run_agent(_parse_args(agent_argv), agent_argv)
+
+
+def _finish_brief(args: argparse.Namespace, project, result, say) -> None:
+    """implement로 시작한 실행의 뒷정리: 둔 테스트 지우기, 성공 기록 또는 재요청문 쓰기."""
+    path = handoff.brief_dir(BRIEFS_DIR, args.brief_id)
+    record = handoff.load(path)
+    copy_dir = path / f"tests-{record['round']}"
+    expected = {}
+    for relative in record["tests"]:
+        try:
+            expected[relative] = (copy_dir / relative).read_text(encoding="utf-8")
+        except OSError:
+            pass
+    handoff.remove_tests(project.root, record["tests"], expected)
+    if result is not None and result.status == SUCCEEDED:
+        handoff.mark_done(path, result.branch)
+        return
+    failure = result.message if result is not None else "에이전트가 중간에 멈췄습니다."
+    handoff.write_retry(path, failure)
+    say("\n구현에 실패해 ChatGPT에 보낼 재요청문을 만들었습니다(테스트가 틀렸을 수도 있습니다).")
+    say(f"  python -m dev_automation copy {args.brief_id}   # 복사해서 같은 대화에 붙여넣기")
+    say(f"  python -m dev_automation implement {args.brief_id}   # 새 답장으로 다시 구현")
+
+
 def main(argv: list[str] | None = None) -> int:
     sys.stdout.reconfigure(encoding="utf-8")
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -150,6 +318,14 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_log(args.job_id, args.follow)
     if args.command == "cancel":
         return _cmd_cancel(args.job_id)
+    if args.command == "brief":
+        return _cmd_brief(args)
+    if args.command == "copy":
+        return _cmd_copy(args.brief_id)
+    if args.command == "briefs":
+        return _cmd_briefs()
+    if args.command == "implement":
+        return _cmd_implement(args)
     if args.job_dir:
         return _run_job(args)
     return _run_agent(args, argv)
@@ -225,6 +401,7 @@ def _run_agent(
         return 0
 
     llm = OllamaClient(args.model)
+    result = None
     try:
         result = run_task(
             project,
@@ -241,6 +418,9 @@ def _run_agent(
     finally:
         # 끝난 뒤 5분 동안 VRAM을 붙잡지 않도록 모델을 바로 내린다.
         llm.unload()
+        if args.brief_id and result is None:
+            # 예외로 끝났어도 프로젝트에 둔 테스트는 치운다.
+            _finish_brief(args, project, result, say)
 
     if outcome is not None:
         outcome["branch"] = result.branch if result.status == SUCCEEDED else None
@@ -258,6 +438,9 @@ def _run_agent(
         say("\n검토 후 다음 명령을 사용하세요.")
         say(f"  git diff main..{result.branch}")
         say(f"  git merge {result.branch}")
+    if args.brief_id:
+        # 다음에 할 일(재요청)이 출력 맨 끝에 보이도록 결과 요약 뒤에 정리한다.
+        _finish_brief(args, project, result, say)
     return 0 if result.status == SUCCEEDED else 1
 
 

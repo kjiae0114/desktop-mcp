@@ -65,3 +65,36 @@ def test_syntax_error_file_does_not_break(tmp_path):
     _write(tmp_path, {"bad.py": "def (:\n"})
 
     assert "구문 오류" in build_context(tmp_path, [])
+
+
+def test_git_repo_respects_gitignore(tmp_path):
+    import subprocess
+
+    _write(tmp_path, {"app.py": "def run():\n    pass\n", "workspace/out.json": "{}", ".gitignore": "workspace/\n"})
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+
+    text = build_context(tmp_path, [])
+
+    assert "app.py" in text and "def run()" in text
+    assert "workspace" not in text
+
+
+def test_big_file_signatures_are_not_cut(tmp_path):
+    body = "".join(f"def f{i}(x):\n    return x  # {'긴 주석' * 20}\n\n" for i in range(200))
+    _write(tmp_path, {"big.py": body})
+
+    text = build_context(tmp_path, [], budget=100000)
+
+    assert "구문 오류" not in text and "def f199(x)" in text
+
+
+def test_tight_budget_keeps_public_signatures_before_names_only(tmp_path):
+    many = "".join(
+        f"def _private{i}(a, b, c):\n    '''{'설명' * 30}'''\n\n" for i in range(100)
+    ) + "def public_api(x):\n    '''공개 함수.'''\n"
+    _write(tmp_path, {"pkg/core.py": many, "tests/test_core.py": "def test_x():\n    pass\n"})
+
+    text = build_context(tmp_path, [], budget=800)
+
+    assert "def public_api(x)" in text
+    assert "_private" not in text
