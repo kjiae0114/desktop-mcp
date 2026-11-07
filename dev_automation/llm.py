@@ -1,6 +1,7 @@
 """로컬 LLM(Ollama) 호출. 코드와 데이터가 외부로 나가지 않도록 로컬 호스트만 허용한다."""
 
 import json
+import re
 from typing import Protocol
 from urllib.error import URLError
 from urllib.parse import urlparse
@@ -26,6 +27,47 @@ def _parse_arguments(arguments: object) -> dict:
         except ValueError:
             return {}
     return arguments if isinstance(arguments, dict) else {}
+
+
+_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
+_TAG = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.S)
+
+
+def _text_tool_calls(content: str, tool_names: set[str]) -> list[dict]:
+    """일부 모델(qwen2.5-coder 등)은 도구 호출을 tool_calls 대신 본문에 JSON으로 쓴다. 그걸 읽는다.
+
+    등록된 도구 이름만 받아들인다. 해석이 애매하면 빈 목록을 돌려 평소처럼 '답변'으로 둔다.
+    """
+    text = content.strip()
+    if not text:
+        return []
+    pieces = _TAG.findall(text) or _FENCE.findall(text) or [text]
+    candidates: list = []
+    for piece in pieces:
+        piece = piece.strip()
+        try:
+            data = json.loads(piece)
+        except ValueError:
+            # 한 줄에 하나씩 쓴 경우
+            data = []
+            for line in piece.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data.append(json.loads(line))
+                except ValueError:
+                    return []
+        candidates.extend(data if isinstance(data, list) else [data])
+    calls = []
+    for item in candidates:
+        if not isinstance(item, dict) or item.get("name") not in tool_names:
+            return []
+        calls.append({
+            "name": item["name"],
+            "arguments": _parse_arguments(item.get("arguments", item.get("parameters", {}))),
+        })
+    return calls
 
 
 class OllamaClient:
@@ -79,7 +121,13 @@ class OllamaClient:
                 "name": function.get("name", ""),
                 "arguments": _parse_arguments(function.get("arguments")),
             })
-        return {"content": message.get("content") or "", "tool_calls": tool_calls}
+        content = message.get("content") or ""
+        if not tool_calls:
+            names = {t.get("function", {}).get("name") for t in tools if isinstance(t, dict)}
+            parsed = _text_tool_calls(content, names - {None})
+            if parsed:
+                tool_calls, content = parsed, ""
+        return {"content": content, "tool_calls": tool_calls}
 
     def unload(self) -> None:
         """모델을 GPU·메모리에서 바로 내린다. 실패해도 작업 결과에는 영향이 없으므로 무시한다.

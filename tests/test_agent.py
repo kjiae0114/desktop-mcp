@@ -79,6 +79,10 @@ def runs_dir(tmp_path):
 
 
 def run(project, runs_dir, llm, task="add를 정리", **kwargs):
+    # 기존 테스트는 각자 확인하는 동작만 보도록 저장소 요약과 스스로 테스트 쓰기를 끈다.
+    # 두 기능은 아래 전용 테스트에서 확인한다.
+    kwargs.setdefault("context_chars", 0)
+    kwargs.setdefault("self_test", False)
     messages = []
     result = run_task(project, task, llm, runs_dir, on_progress=messages.append, **kwargs)
     return result, messages
@@ -592,10 +596,62 @@ def test_cancel_from_progress_stops_and_cleans_up(project, repo, runs_dir):
             raise agent.TaskCancelled("사용자가 취소했습니다.")
 
     llm = FakeLLM(call("read_file", path="mod.py"), BREAK, done())
-    result = run_task(project, "add를 정리", llm, runs_dir, on_progress=progress)
+    result = run_task(
+        project, "add를 정리", llm, runs_dir, on_progress=progress, context_chars=0, self_test=False
+    )
 
     assert result.status == agent.FAILED
     assert result.message == "사용자가 취소했습니다."
     assert len(llm.replies) == 2  # 첫 도구 호출에서 멈춤
     assert branches(repo) == []
     assert_clean_worktrees(repo)
+
+
+def test_repo_context_is_added_to_first_message(project, runs_dir):
+    llm = FakeLLM(REFACTOR, done())
+
+    result, messages = run(project, runs_dir, llm, context_chars=8000)
+
+    first = llm.seen[0][1]["content"]
+    assert first.startswith("add를 정리\n\n## 저장소 지도")
+    assert "def add(a, b)" in first
+    assert "이미 있습니다" in llm.seen[0][0]["content"]
+    assert any(m.startswith("저장소 요약") for m in messages)
+    assert result.status == agent.SUCCEEDED
+
+
+def test_self_test_nudges_once_when_no_test_was_written(project, repo, runs_dir):
+    add_test = call(
+        "write_file", path="tests/test_refactor.py",
+        content="from mod import add\n\n\ndef test_order():\n    assert add(2, 1) == 3\n",
+    )
+    llm = FakeLLM(REFACTOR, done(), add_test, done())
+
+    result, messages = run(project, runs_dir, llm, self_test=True)
+
+    assert "요구사항의 조건 하나하나" in llm.seen[0][0]["content"]
+    assert any("테스트 작성을 요청" in m for m in messages)
+    assert "테스트가 아직 없습니다" in llm.seen[2][-1]["content"]
+    assert result.status == agent.SUCCEEDED
+    assert "tests/test_refactor.py" in result.changed_files
+
+
+def test_self_test_nudge_happens_only_once(project, runs_dir):
+    llm = FakeLLM(REFACTOR, done(), done())
+
+    result, _ = run(project, runs_dir, llm, self_test=True)
+
+    assert result.status == agent.SUCCEEDED  # 두 번째로 끝내면 그대로 받아들인다
+    assert llm.replies == []
+
+
+def test_self_test_is_off_when_tests_are_locked(project, repo, runs_dir):
+    (repo / "test_new.py").write_text(
+        "from mod import add\n\n\ndef test_new():\n    assert add(1, 1) == 2\n", encoding="utf-8"
+    )
+    llm = FakeLLM(REFACTOR, done())
+
+    result, messages = run(project, runs_dir, llm, self_test=True, protected_tests=["test_new.py"])
+
+    assert result.status == agent.SUCCEEDED
+    assert not any("테스트 작성을 요청" in m for m in messages)

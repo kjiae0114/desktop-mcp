@@ -34,6 +34,8 @@ Windows 전용 개인 도구입니다. 서로 호출하지 않는 프로그램 �
 | `desktop_mcp.py` | MCP 도구 12개. GUI는 `_gui()`, 클립보드는 `_clipboard_copy()`로만 접근 (테스트에서 교체) |
 | `coordinate_picker.py` | 클릭 좌표를 고르는 tkinter 창 (테스트 없음) |
 | `dev_automation/__main__.py` | CLI (`agent [--background]`, `jobs`, `log`, `cancel`) |
+| `dev_automation/context.py` | 첫 메시지용 저장소 요약 (`--context`, 기본 끔) |
+| `dev_automation/spec.py` | 요구사항→테스트 먼저 쓰기 실험. 벤치마크 전용 |
 | `dev_automation/jobs.py` | 에이전트 백그라운드 프로세스. `runs/jobs/<id>/`에 job.json·output.log, `cancel` 파일로 취소 |
 | `dev_automation/agent.py` | 워크트리 → 기준 테스트 → 모델 루프 → 최종 테스트 → 비밀값·잠금 검사 → 커밋 |
 | `dev_automation/agent_tools.py` | 모델용 파일 도구와 차단 경로 |
@@ -43,10 +45,13 @@ Windows 전용 개인 도구입니다. 서로 호출하지 않는 프로그램 �
 | `dev_automation/projects.py` | `config/projects.json` 검증, `COMMAND_PROFILES` |
 | `dev_automation/paths.py` | 경로 탈출 차단 |
 | `dev_automation/runs.py` | 서버용 명령 실행 이력 (쓰는 곳 없음, CLI 백그라운드는 jobs.py) |
+| `scripts/agent_bench.py` | 에이전트 벤치마크(과제 T1~T5, `--hidden` 블라인드). 결과는 README 3-9절 |
 | `tests/` | pytest. `test_desktop_mcp.py`는 가짜 GUI와 실제 stdio 서버 기동 |
 | `sandbox/python.Dockerfile` | 테스트 이미지 `desktop-mcp-sandbox:py312` |
 
 ## 지켜야 할 규칙
+
+- 에이전트 동작(프롬프트, 단계, 기본값)을 바꾸면 `scripts/agent_bench.py --hidden`으로 전후를 재고 README 3-9절 표를 갱신합니다. 느낌으로 기본값을 바꾸지 않습니다. 2026-11-07에 그럴듯한 개선 셋이 모두 효과가 없거나 마이너스였습니다.
 
 - 새 기능도 허용 목록 방식으로 만듭니다. 임의 명령, 임의 경로, 셸 실행(`shell=True`)은 추가하지 않습니다.
 - MCP 도구를 추가하거나 이름을 바꾸면 `tests/test_desktop_mcp.py::test_registered_tools`, 개수 확인(`len(names) == 12`), `tests/test_runner.py::test_existing_desktop_mcp_is_unaffected`를 함께 고칩니다.
