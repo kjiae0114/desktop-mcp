@@ -20,7 +20,7 @@ Windows 전용 개인 도구입니다. 서로 호출하지 않는 프로그램 �
 .\.venv-new\Scripts\python.exe -m dev_automation agent desktop-mcp "<작업>" --test <잠글 테스트>
 ```
 
-- CI는 `.github/workflows/test.yml`입니다(windows-latest, push to main과 PR). Docker 통합 테스트는 이미지가 없어 skip되므로 Docker 관련 변경은 로컬에서도 확인합니다.
+- CI는 `.github/workflows/test.yml`입니다(push to main과 PR). `pytest` job은 windows-latest(Docker 테스트 skip), `linux-sandbox` job은 ubuntu에서 샌드박스 이미지를 빌드해 `scripts/sandbox_baseline.py`(에이전트 기준 테스트 재현)와 Docker 통합 테스트까지 돌립니다. 테스트는 Windows와 Linux 양쪽에서 통과해야 합니다. 에이전트가 Linux 컨테이너에서 기준 테스트를 돌리기 때문입니다.
 - HTTP 모드는 `BearerTokenMiddleware`가 모든 요청의 `Authorization: Bearer` 헤더를 검사합니다. 이 검사를 우회하는 경로를 만들지 않습니다.
 
 - 가상환경은 `.venv-new`(Python 3.12)를 씁니다.
@@ -66,5 +66,6 @@ Windows 전용 개인 도구입니다. 서로 호출하지 않는 프로그램 �
 
 - [x] HTTP 모드 인증: `DESKTOP_MCP_TOKEN` Bearer 토큰 검사 (2026-11-06)
 - [x] GitHub Actions CI (windows-latest) (2026-11-06)
+- [x] CI에 Linux 샌드박스 job 추가: 에이전트 기준 테스트 재현 (2026-11-07)
 - [x] 새 clone에서 README대로 설치 검증 (2026-11-06)
 - [x] 정리: `.venv`, `.bak`, `update.finished`, 병합된 로컬 브랜치 7개 삭제 (2026-11-06). `runs/agent/*` 기록 4개는 README 성공률의 근거라 남김

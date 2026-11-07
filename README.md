@@ -423,7 +423,10 @@ docker build -t my-app-sandbox:py312 -f C:\programming\02_tools\desktop-mcp\sand
 ## 8. 유지보수
 
 - **변경 후 확인:** 코드를 고치면 `.\scripts\check.ps1`로 전체 테스트를 돌립니다.
-- **CI:** GitHub에 push하거나 PR을 열면 GitHub Actions(`.github/workflows/test.yml`)가 `windows-latest`에서 같은 테스트를 돌립니다. CI에는 Docker 테스트 이미지가 없어서 Docker 통합 테스트 17개와 `.venv-new`가 필요한 테스트 1개는 건너뜁니다(2026-11-06 기준 `246 passed, 18 skipped`). 그래서 Docker 쪽을 고쳤다면 내 PC에서도 꼭 돌려 보세요. 결과는 README 맨 위 배지와 저장소의 Actions 탭에서 봅니다.
+- **CI:** GitHub에 push하거나 PR을 열면 GitHub Actions(`.github/workflows/test.yml`)가 두 가지를 돌립니다.
+  - `pytest`(windows-latest): 전체 테스트. Docker 이미지가 없어 Docker 통합 테스트는 건너뜁니다.
+  - `linux-sandbox`(ubuntu-latest): 샌드박스 이미지를 빌드하고 `scripts/sandbox_baseline.py`로 **에이전트의 기준 테스트를 그대로 재현**한 뒤, Docker 통합 테스트를 포함한 전체 테스트를 Linux에서 돌립니다. Windows에서만 통과하는 테스트가 들어오면 에이전트가 "작업 전부터 테스트가 실패합니다"로 멈추는데(2026-11-06 실제 발생), 이 job이 그걸 잡습니다.
+  - 내 PC에서 같은 확인: `.\.venv-new\Scripts\python.exe scripts\sandbox_baseline.py` (종료 코드 0이면 통과). 결과는 README 맨 위 배지와 저장소의 Actions 탭에서 봅니다.
 - **의존성 변경:** `requirements.txt`를 바꾸면 2-2의 pip 설치와 2-4의 이미지 빌드를 다시 합니다.
 - **모델 교체:**
   1. `ollama pull 새모델`로 받습니다.
