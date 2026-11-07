@@ -65,16 +65,21 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    result = run_task(
-        project,
-        args.task,
-        OllamaClient(args.model),
-        Path(args.runs_dir),
-        max_steps=args.max_steps,
-        protected_tests=args.test,
-        sandbox=sandbox,
-        on_progress=_progress,
-    )
+    llm = OllamaClient(args.model)
+    try:
+        result = run_task(
+            project,
+            args.task,
+            llm,
+            Path(args.runs_dir),
+            max_steps=args.max_steps,
+            protected_tests=args.test,
+            sandbox=sandbox,
+            on_progress=_progress,
+        )
+    finally:
+        # 끝난 뒤 5분 동안 VRAM을 붙잡지 않도록 모델을 바로 내린다.
+        llm.unload()
 
     _progress(f"\n상태: {result.status}")
     _progress(f"메시지: {result.message}")

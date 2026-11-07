@@ -52,6 +52,7 @@ def test_chat_sends_expected_request_and_parses_tool_calls(server):
     assert path == "/api/chat"
     assert body["model"] == "m"
     assert body["stream"] is False and body["think"] is False
+    assert body["keep_alive"] == "5m"
     assert body["options"] == {"temperature": 0.2, "num_ctx": 8192}
     assert reply["tool_calls"] == [
         {"name": "read_file", "arguments": {"path": "a.py"}},
@@ -91,3 +92,33 @@ def test_non_local_host_is_rejected(url):
 
 def test_localhost_is_allowed():
     OllamaClient("m", "http://localhost:11434")
+
+
+def test_unload_sends_keep_alive_zero(server):
+    OllamaClient("m", server["url"]).unload()
+
+    path, body = server["requests"][0]
+    assert path == "/api/generate"
+    assert body == {"model": "m", "keep_alive": 0}
+
+
+def test_unload_ignores_connection_error():
+    OllamaClient("m", "http://127.0.0.1:9").unload()
+
+
+def test_cli_unloads_model_even_when_task_raises(monkeypatch):
+    from types import SimpleNamespace
+
+    from dev_automation import __main__ as cli
+
+    unloaded = []
+    monkeypatch.setattr(cli, "load_projects", lambda path: {"demo": SimpleNamespace(sandbox=None)})
+    monkeypatch.setattr(cli, "OllamaClient", lambda model: SimpleNamespace(unload=lambda: unloaded.append(model)))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("중간 실패")
+
+    monkeypatch.setattr(cli, "run_task", boom)
+    with pytest.raises(RuntimeError):
+        cli.main(["agent", "demo", "작업", "--unsafe-host-tests"])
+    assert unloaded == ["qwen3.5:4b-q4_K_M"]

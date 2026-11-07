@@ -544,7 +544,7 @@ def _cli(monkeypatch, result):
 
     project = SimpleNamespace(sandbox=None)
     monkeypatch.setattr(cli, "load_projects", lambda path: {"demo": project})
-    monkeypatch.setattr(cli, "OllamaClient", lambda model: object())
+    monkeypatch.setattr(cli, "OllamaClient", lambda model: SimpleNamespace(unload=lambda: None))
     captured = {}
 
     def fake_run_task(project, task, llm, runs_dir, **kwargs):
