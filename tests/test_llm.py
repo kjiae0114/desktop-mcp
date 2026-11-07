@@ -122,3 +122,38 @@ def test_cli_unloads_model_even_when_task_raises(monkeypatch):
     with pytest.raises(RuntimeError):
         cli.main(["agent", "demo", "작업", "--unsafe-host-tests"])
     assert unloaded == ["qwen3.5:4b-q4_K_M"]
+
+
+TOOLS = [{"type": "function", "function": {"name": "read_file"}},
+         {"type": "function", "function": {"name": "run_tests"}}]
+
+
+@pytest.mark.parametrize("content, expected", [
+    ('{"name": "read_file", "arguments": {"path": "a.py"}}', [("read_file", {"path": "a.py"})]),
+    ('```json\n{"name": "run_tests", "arguments": {}}\n```', [("run_tests", {})]),
+    ('<tool_call>\n{"name": "read_file", "arguments": "{\\"path\\": \\"b.py\\"}"}\n</tool_call>',
+     [("read_file", {"path": "b.py"})]),
+    ('{"name": "read_file", "arguments": {"path": "a"}}\n{"name": "run_tests", "arguments": {}}',
+     [("read_file", {"path": "a"}), ("run_tests", {})]),
+])
+def test_text_tool_calls_are_parsed(server, content, expected):
+    server["reply"] = {"message": {"content": content}}
+
+    reply = OllamaClient("m", server["url"]).chat([], TOOLS)
+
+    assert [(c["name"], c["arguments"]) for c in reply["tool_calls"]] == expected
+    assert reply["content"] == ""
+
+
+@pytest.mark.parametrize("content", [
+    "add 함수를 추가했습니다.",
+    '{"name": "delete_everything", "arguments": {}}',  # 등록되지 않은 도구
+    '{"name": "read_file", "arguments": {}}\n그리고 끝',  # 섞인 글
+    '{"result": "ok"}',
+])
+def test_text_that_is_not_a_tool_call_stays_content(server, content):
+    server["reply"] = {"message": {"content": content}}
+
+    reply = OllamaClient("m", server["url"]).chat([], TOOLS)
+
+    assert reply == {"content": content, "tool_calls": []}

@@ -13,7 +13,7 @@ import sys
 import time
 
 from dev_automation import jobs
-from dev_automation.agent import SUCCEEDED, run_task
+from dev_automation.agent import CONTEXT_CHARS_WHEN_ON, SUCCEEDED, run_task
 from dev_automation.llm import OllamaClient
 from dev_automation.projects import ProjectConfigError, load_projects
 from dev_automation.sandbox import DockerSandbox
@@ -43,6 +43,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     agent.add_argument(
         "--unsafe-host-tests", action="store_true",
         help="Docker 격리 없이 모델이 쓴 코드를 이 PC에서 직접 실행한다. sandbox 설정이 없을 때만 쓴다.",
+    )
+    agent.add_argument(
+        "--context", action="store_true",
+        help="(실험) 저장소 지도와 관련 파일 내용을 첫 메시지에 넣는다. 4B 기준 효과는 측정되지 않았다.",
+    )
+    agent.add_argument(
+        "--self-test", action="store_true",
+        help="(실험) --test가 없을 때 모델이 요구사항 테스트를 직접 쓰게 한다. 4B 기준 효과는 측정되지 않았다.",
     )
     agent.add_argument(
         "--background", action="store_true",
@@ -224,6 +232,8 @@ def _run_agent(
             llm,
             Path(args.runs_dir),
             max_steps=args.max_steps,
+            context_chars=CONTEXT_CHARS_WHEN_ON if args.context else 0,
+            self_test=args.self_test,
             protected_tests=args.test,
             sandbox=sandbox,
             on_progress=say,

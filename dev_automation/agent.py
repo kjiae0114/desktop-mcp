@@ -15,6 +15,7 @@ import secrets
 import shutil
 
 from dev_automation.agent_tools import TOOL_SCHEMAS, ToolBox, is_blocked, normalize_path
+from dev_automation.context import build_context
 from dev_automation.llm import LLMClient, LLMError
 from dev_automation.paths import PathPolicyError, resolve_new_within, resolve_within
 from dev_automation.projects import Project
@@ -54,6 +55,22 @@ SYSTEM_PROMPT = (
     "- 작업이 끝나면 도구를 호출하지 말고 무엇을 바꿨는지 짧게 요약만 답하세요."
 )
 PROTECTED_PROMPT = "\n- 테스트 파일은 고칠 수 없습니다. 테스트를 통과하도록 코드만 고치세요."
+CONTEXT_PROMPT = (
+    "\n- 작업 메시지 아래에 저장소 지도, 잠근 테스트, 관련 파일 내용이 이미 있습니다. "
+    "거기 없는 파일만 read_file로 읽고, 바로 수정을 시작하세요."
+)
+# 저장소 요약을 켤 때 쓰는 길이. 기본은 끔(0): 2026-11-07 블라인드 벤치마크에서 4B 기준 효과가 측정되지 않았다
+# (6/10 → 5/10, 과제당 2회라 오차 범위). scripts/agent_bench.py로 다시 잴 수 있다.
+CONTEXT_CHARS_WHEN_ON = 8000
+SELF_TEST_PROMPT = (
+    "\n- 잠근 테스트가 없습니다. 요구사항의 조건 하나하나를 확인하는 pytest 테스트를 tests/ 아래에 "
+    "직접 추가하세요. 새로 만든 파일은 테스트에서 import해 실제로 불러지는지 확인합니다. "
+    "run_tests로 통과를 확인한 뒤 끝내세요."
+)
+SELF_TEST_NUDGE = (
+    "요구사항을 확인하는 테스트가 아직 없습니다. 요구사항의 조건마다 tests/ 아래에 테스트를 추가하고 "
+    "run_tests로 확인하세요. 테스트가 실패하면 코드를 고치세요."
+)
 
 
 class TaskCancelled(Exception):
@@ -195,6 +212,8 @@ def run_task(
     protected_tests: Sequence[str] = (),
     sandbox: DockerSandbox | None = None,
     on_progress: Callable[[str], None] = print,
+    context_chars: int = 0,
+    self_test: bool = False,
 ) -> AgentResult:
     task_id = f"agent-{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
     branch = f"agent/{task_id}"
@@ -296,6 +315,15 @@ def run_task(
             names = "\n".join(f"- {relative}" for relative, _ in locked)
             user_task += f"\n\n잠근 테스트(수정 불가):\n{names}"
             on_progress("잠근 테스트: " + ", ".join(relative for relative, _ in locked))
+        if self_test and not locked:
+            # 정답지가 없으면 모델이 스스로 쓰게 한다. 테스트 없는 "다 했어요"는 믿지 않는다.
+            system_prompt += SELF_TEST_PROMPT
+        if context_chars > 0:
+            # 작은 모델은 list_files/read_file로 구조를 파악하느라 단계를 많이 쓴다. 미리 넣어 준다.
+            summary = build_context(worktree, [relative for relative, _ in locked], context_chars)
+            user_task += "\n\n" + summary
+            system_prompt += CONTEXT_PROMPT
+            on_progress(f"저장소 요약 {len(summary)}자를 첫 메시지에 넣었습니다.")
 
         toolbox = ToolBox(
             worktree, run_locked_tests if locked else run_tests, [rel for rel, _ in locked]
@@ -305,6 +333,7 @@ def run_task(
             {"role": "user", "content": user_task},
         ]
         fix_attempts = 0
+        nudged = False
         call_counts: dict[str, int] = {}
         state_counts: dict[tuple[str, str | None], int] = {}
 
@@ -345,7 +374,15 @@ def run_task(
                 continue
 
             # 모델의 성공 주장은 믿지 않고 테스트 결과로만 판단한다.
-            if not _git(worktree, "status", "--porcelain").stdout.strip():
+            status_text = _git(worktree, "status", "--porcelain", "-uall").stdout
+            if self_test and not locked and not nudged:
+                touched = [line[3:].strip() for line in status_text.splitlines() if line.strip()]
+                if touched and not any(_is_test_file(name, set()) for name in touched):
+                    nudged = True
+                    on_progress("모델이 테스트 없이 끝내려 해서 테스트 작성을 요청합니다.")
+                    messages.append({"role": "user", "content": SELF_TEST_NUDGE})
+                    continue
+            if not status_text.strip():
                 result.status, result.message = NO_CHANGES, "변경된 내용이 없습니다."
                 return result
 
