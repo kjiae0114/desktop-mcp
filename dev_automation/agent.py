@@ -56,6 +56,10 @@ SYSTEM_PROMPT = (
 PROTECTED_PROMPT = "\n- 테스트 파일은 고칠 수 없습니다. 테스트를 통과하도록 코드만 고치세요."
 
 
+class TaskCancelled(Exception):
+    """on_progress가 이 예외를 던지면 작업을 멈추고 정리한 뒤 실패로 끝낸다."""
+
+
 @dataclass
 class AgentResult:
     status: str
@@ -391,6 +395,9 @@ def run_task(
         return result
     except LLMError as exc:
         result.message = f"모델 호출 실패: {exc}"
+        return result
+    except TaskCancelled as exc:
+        result.message = str(exc)
         return result
     except Exception as exc:
         result.message = f"예상하지 못한 오류: {exc}"

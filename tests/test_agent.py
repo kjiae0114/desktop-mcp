@@ -580,3 +580,22 @@ def test_cli_without_changed_tests_has_no_warning(monkeypatch, capsys):
     assert code == 1
     assert captured["protected_tests"] == []
     assert "모델이 수정한 테스트가 있습니다" not in capsys.readouterr().out
+
+
+def test_cancel_from_progress_stops_and_cleans_up(project, repo, runs_dir):
+    seen = []
+
+    def progress(message):
+        seen.append(message)
+        if message.startswith("도구:") and not any(m == "취소됨" for m in seen):
+            seen.append("취소됨")
+            raise agent.TaskCancelled("사용자가 취소했습니다.")
+
+    llm = FakeLLM(call("read_file", path="mod.py"), BREAK, done())
+    result = run_task(project, "add를 정리", llm, runs_dir, on_progress=progress)
+
+    assert result.status == agent.FAILED
+    assert result.message == "사용자가 취소했습니다."
+    assert len(llm.replies) == 2  # 첫 도구 호출에서 멈춤
+    assert branches(repo) == []
+    assert_clean_worktrees(repo)
